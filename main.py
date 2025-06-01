@@ -4,29 +4,14 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.widgets import Slider, Button, RadioButtons
 import numpy as np
+import pickle
+import os
+from datetime import datetime
+from utils.helpers import relu, relu_derivative, linear, linear_derivative, tanh_func, tanh_derivative
 
 # Link lengths (as specified in the project)
 a1 = 3.0  # 3 cm
 a2 = 2.0  # 2 cm
-
-# Activation functions
-def relu(x):
-    return max(0, x)
-
-def relu_derivative(x):
-    return 1 if x > 0 else 0
-
-def linear(x):
-    return x
-
-def linear_derivative(x):
-    return 1
-
-def tanh_func(x):
-    return math.tanh(x)
-
-def tanh_derivative(x):
-    return 1 - math.tanh(x)**2
 
 # Neural Network Node class
 class Node:
@@ -63,15 +48,23 @@ class Layer:
         self.outputs = [node.forward(inputs) for node in self.nodes]
         return self.outputs
 
-# Enhanced Neural Network class
+# Enhanced Neural Network class with save/load functionality
 class NeuralNetwork:
     def __init__(self):
         self.layers = []
         self.learning_rate = 0.001
+        self.architecture = []  # Store architecture info for reconstruction
 
     def add_layer(self, num_nodes, activation_func=relu, activation_derivative=relu_derivative):
         layer = Layer(num_nodes, activation_func, activation_derivative)
         self.layers.append(layer)
+
+        # Store architecture info
+        func_name = activation_func.__name__ if hasattr(activation_func, '__name__') else 'unknown'
+        self.architecture.append({
+            'num_nodes': num_nodes,
+            'activation': func_name
+        })
 
     def initialize_network(self, input_size):
         prev_size = input_size
@@ -131,6 +124,65 @@ class NeuralNetwork:
 
     def predict(self, inputs):
         return self.forward_propagation(inputs)
+    
+    def save_to_file(self, filename):
+        """Save the neural network to a file"""
+        save_data = {
+            'architecture': self.architecture,
+            'learning_rate': self.learning_rate,
+            'weights_and_biases': []
+        }
+        
+        # Extract weights and biases from each layer
+        for layer in self.layers:
+            layer_data = []
+            for node in layer.nodes:
+                layer_data.append({
+                    'weights': node.weights.copy(),
+                    'bias': node.bias
+                })
+            save_data['weights_and_biases'].append(layer_data)
+        
+        # Save to file
+        with open(filename, 'wb') as f:
+            pickle.dump(save_data, f)
+    
+    @classmethod
+    def load_from_file(cls, filename):
+        """Load a neural network from a file"""
+        with open(filename, 'rb') as f:
+            save_data = pickle.load(f)
+        
+        # Create new network
+        nn = cls()
+        nn.learning_rate = save_data['learning_rate']
+        
+        # Reconstruct architecture
+        activation_map = {
+            'relu': (relu, relu_derivative),
+            'linear': (linear, linear_derivative),
+            'tanh_func': (tanh_func, tanh_derivative)
+        }
+        
+        for layer_info in save_data['architecture']:
+            activation_name = layer_info['activation']
+            if activation_name in activation_map:
+                activation_func, activation_derivative = activation_map[activation_name]
+            else:
+                activation_func, activation_derivative = relu, relu_derivative
+            
+            nn.add_layer(layer_info['num_nodes'], activation_func, activation_derivative)
+        
+        # Initialize network structure
+        nn.initialize_network(input_size=2)
+        
+        # Load weights and biases
+        for layer_idx, layer_data in enumerate(save_data['weights_and_biases']):
+            for node_idx, node_data in enumerate(layer_data):
+                nn.layers[layer_idx].nodes[node_idx].weights = node_data['weights']
+                nn.layers[layer_idx].nodes[node_idx].bias = node_data['bias']
+        
+        return nn
 
 # Robot arm kinematics functions
 def direct_kinematics(theta1, theta2):
@@ -236,10 +288,138 @@ def generate_full_workspace_data(num_samples=2000):
     
     return training_data
 
+
+class NetworkManager:
+    """Manages saving and loading of neural networks"""
+    
+    def __init__(self, models_dir="saved_models"):
+        self.models_dir = models_dir
+        if not os.path.exists(models_dir):
+            os.makedirs(models_dir)
+    
+    def get_model_filename(self, training_type):
+        """Get the filename for a specific training type"""
+        return os.path.join(self.models_dir, f"robot_arm_nn_{training_type}.pkl")
+    
+    def save_networks(self, networks, training_history):
+        """Save all trained networks and their training history"""
+        for training_type, network in networks.items():
+            filename = self.get_model_filename(training_type)
+            network.save_to_file(filename)
+            print(f"✓ Saved {training_type} network to {filename}")
+        
+        # Save training history
+        history_file = os.path.join(self.models_dir, "training_history.pkl")
+        with open(history_file, 'wb') as f:
+            pickle.dump(training_history, f)
+        print(f"✓ Saved training history to {history_file}")
+    
+    def load_networks(self):
+        """Load all available networks"""
+        networks = {}
+        training_history = {'circle': [], 'quadrant': [], 'full': []}
+        
+        training_types = ['circle', 'quadrant', 'full']
+        
+        for training_type in training_types:
+            filename = self.get_model_filename(training_type)
+            if os.path.exists(filename):
+                try:
+                    networks[training_type] = NeuralNetwork.load_from_file(filename)
+                    print(f"✓ Loaded {training_type} network from {filename}")
+                except Exception as e:
+                    print(f"✗ Failed to load {training_type} network: {e}")
+            else:
+                print(f"✗ No saved {training_type} network found")
+        
+        # Load training history if available
+        history_file = os.path.join(self.models_dir, "training_history.pkl")
+        if os.path.exists(history_file):
+            try:
+                with open(history_file, 'rb') as f:
+                    training_history = pickle.load(f)
+                print("✓ Loaded training history")
+            except Exception as e:
+                print(f"✗ Failed to load training history: {e}")
+        
+        return networks, training_history
+    
+    def list_saved_models(self):
+        """List all available saved models"""
+        print(f"\nAvailable saved models in '{self.models_dir}':")
+        print("-" * 50)
+        
+        training_types = ['circle', 'quadrant', 'full']
+        found_models = []
+        
+        for training_type in training_types:
+            filename = self.get_model_filename(training_type)
+            if os.path.exists(filename):
+                # Get file info
+                stat = os.stat(filename)
+                size_kb = stat.st_size / 1024
+                mod_time = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                
+                print(f"  ✓ {training_type.capitalize()} Network")
+                print(f"    File: {filename}")
+                print(f"    Size: {size_kb:.1f} KB")
+                print(f"    Modified: {mod_time}")
+                print()
+                
+                found_models.append(training_type)
+            else:
+                print(f"  ✗ {training_type.capitalize()} Network - Not found")
+        
+        if not found_models:
+            print("  No saved models found.")
+        
+        return found_models
+
+def cli_interface():
+    """Command line interface for choosing training or loading"""
+    print("=" * 70)
+    print("🤖 ROBOT ARM INVERSE KINEMATICS NEURAL NETWORK")
+    print("=" * 70)
+    
+    manager = NetworkManager()
+    available_models = manager.list_saved_models()
+    
+    print("\nOptions:")
+    print("1. Train new neural networks (and save them)")
+    print("2. Load existing trained networks")
+    print("3. Exit")
+    
+    while True:
+        try:
+            choice = input("\nEnter your choice (1-3): ").strip()
+            
+            if choice == '1':
+                print("\n🎯 Starting new training session...")
+                return 'train', manager
+            
+            elif choice == '2':
+                if not available_models:
+                    print("\n❌ No saved models available. Please train new networks first.")
+                    continue
+                print("\n📂 Loading existing networks...")
+                return 'load', manager
+            
+            elif choice == '3':
+                print("\n👋 Goodbye!")
+                exit()
+            
+            else:
+                print("❌ Invalid choice. Please enter 1, 2, or 3.")
+        
+        except KeyboardInterrupt:
+            print("\n\n👋 Goodbye!")
+            exit()
+
 class RobotArmVisualizer:
-    def __init__(self):
-        self.networks = {}
-        self.training_history = {'circle': [], 'quadrant': [], 'full': []}
+    def __init__(self, networks=None, training_history=None, network_manager=None):
+        self.networks = networks or {}
+        self.training_history = training_history or {'circle': [], 'quadrant': [], 'full': []}
+        self.network_manager = network_manager
         self.current_nn = None
         self.target_x = 3.0
         self.target_y = 2.0
@@ -258,7 +438,21 @@ class RobotArmVisualizer:
         self.setup_arm_plot()
         self.setup_controls()
         self.setup_mouse_events()
-        self.train_networks()
+        
+        # If no networks provided, train them
+        if not self.networks:
+            self.train_networks()
+        else:
+            # Prioritize full workspace network
+            if 'full' in self.networks:
+                self.current_nn = self.networks['full']
+            elif 'quadrant' in self.networks:
+                self.current_nn = self.networks['quadrant']
+            elif 'circle' in self.networks:
+                self.current_nn = self.networks['circle']
+            elif self.networks:
+                self.current_nn = list(self.networks.values())[0]
+            self.update_visualization()
 
     def setup_arm_plot(self):
         """Setup the robot arm visualization"""
@@ -378,10 +572,27 @@ class RobotArmVisualizer:
     def setup_controls(self):
         """Setup interactive controls"""
         # Training method selection (positioned below info display)
-  
-        ax_radio = plt.axes([0.03, 0.1, 0.18, 0.15])
-        self.radio = RadioButtons(ax_radio, ('Circle Training', 'Quadrant Training', 'Full Workspace'))
-        self.radio.on_clicked(self.change_training_method)
+        available_methods = []
+        method_labels = []
+        
+        # Add methods in priority order (full workspace first)
+        if 'full' in self.networks:
+            available_methods.append('full')
+            method_labels.append('Full Workspace')
+        if 'quadrant' in self.networks:
+            available_methods.append('quadrant')
+            method_labels.append('Quadrant Training')
+        if 'circle' in self.networks:
+            available_methods.append('circle')
+            method_labels.append('Circle Training')
+        
+        if method_labels:
+            ax_radio = plt.axes([0.03, 0.1, 0.18, 0.15])
+            self.radio = RadioButtons(ax_radio, method_labels)
+            self.radio.on_clicked(self.change_training_method)
+            # Set default selection to Full Workspace if available
+            if 'Full Workspace' in method_labels:
+                self.radio.set_active(method_labels.index('Full Workspace'))
         
         # Target X slider
         ax_x = plt.axes([0.76, 0.40, 0.2, 0.03])
@@ -442,6 +653,13 @@ class RobotArmVisualizer:
             self.networks[training_type] = nn
             self.training_history[training_type] = losses
         
+        # Save networks after training
+        if self.network_manager:
+            print("\n" + "=" * 60)
+            print("💾 Saving trained networks...")
+            self.network_manager.save_networks(self.networks, self.training_history)
+            print("✅ All networks saved successfully!")
+        
         # Set default to full workspace network
         self.current_nn = self.networks['full']
         self.update_visualization()
@@ -453,8 +671,10 @@ class RobotArmVisualizer:
             'Quadrant Training': 'quadrant', 
             'Full Workspace': 'full'
         }
-        self.current_nn = self.networks[method_map[label]]
-        self.update_visualization()
+        network_key = method_map.get(label)
+        if network_key and network_key in self.networks:
+            self.current_nn = self.networks[network_key]
+            self.update_visualization()
 
     def update_target_x(self, val):
         self.target_x = val
@@ -479,70 +699,70 @@ class RobotArmVisualizer:
         self.update_visualization()
 
     def update_visualization(self):
-        """Update the robot arm visualization"""
-        if self.current_nn is None:
-            return
-        
-        # Constrain target to workspace
-        distance = math.sqrt(self.target_x**2 + self.target_y**2)
-        if distance > a1 + a2 - 0.1:
-            scale = (a1 + a2 - 0.1) / distance
-            self.target_x *= scale
-            self.target_y *= scale
-        
-        # Get neural network prediction
-        theta1_nn, theta2_nn = self.current_nn.predict([self.target_x, self.target_y])
-        x_nn, y_nn = direct_kinematics(theta1_nn, theta2_nn)
-        
-        # Get analytical solution for comparison
-        theta1_analytical, theta2_analytical = analytical_inverse_kinematics(self.target_x, self.target_y)
-        
-        # Calculate joint positions for NN solution
-        x1_nn = a1 * math.cos(theta1_nn)
-        y1_nn = a1 * math.sin(theta1_nn)
-        
-        # Update arm links and joints (NN solution)
-        self.link1_line.set_data([0, x1_nn], [0, y1_nn])
-        self.link2_line.set_data([x1_nn, x_nn], [y1_nn, y_nn])
-        self.joint1_point.set_data([0], [0])
-        self.joint2_point.set_data([x1_nn], [y1_nn])
-        self.end_effector_nn.set_data([x_nn], [y_nn])
-        
-        # Update target
-        self.target_point.set_data([self.target_x], [self.target_y])
-        
-        # Show analytical solution if available
-        if theta1_analytical is not None:
-            x_analytical, y_analytical = direct_kinematics(theta1_analytical, theta2_analytical)
-            self.end_effector_analytical.set_data([x_analytical], [y_analytical])
-        else:
-            self.end_effector_analytical.set_data([], [])
-        
-        # Calculate errors
-        nn_error = math.sqrt((self.target_x - x_nn)**2 + (self.target_y - y_nn)**2)
-        
-        # Update information display (formatted for left panel)
-        info_str = "═══ CURRENT STATUS ═══\n"
-        info_str += f"Target Position:\n  X: {self.target_x:.3f} cm\n  Y: {self.target_y:.3f} cm\n\n"
-        info_str += f"Neural Network Result:\n"
-        info_str += f"  θ₁: {math.degrees(theta1_nn):6.1f}°\n"
-        info_str += f"  θ₂: {math.degrees(theta2_nn):6.1f}°\n"
-        info_str += f"  Position: ({x_nn:.3f}, {y_nn:.3f})\n"
-        info_str += f"  Error: {nn_error:.4f} cm\n\n"
-        
-        if theta1_analytical is not None:
-            analytical_error = math.sqrt((self.target_x - x_analytical)**2 + (self.target_y - y_analytical)**2)
-            info_str += f"Analytical Solution:\n"
-            info_str += f"  θ₁: {math.degrees(theta1_analytical):6.1f}°\n"
-            info_str += f"  θ₂: {math.degrees(theta2_analytical):6.1f}°\n"
-            info_str += f"  Error: {analytical_error:.6f} cm"
-        else:
-            info_str += "⚠️ Target outside workspace!"
-        
-        self.info_text.set_text(info_str)
-        
-        # Redraw
-        self.fig.canvas.draw()
+            """Update the robot arm visualization"""
+            if self.current_nn is None:
+                return
+            
+            # Constrain target to workspace
+            distance = math.sqrt(self.target_x**2 + self.target_y**2)
+            if distance > a1 + a2 - 0.1:
+                scale = (a1 + a2 - 0.1) / distance
+                self.target_x *= scale
+                self.target_y *= scale
+            
+            # Get neural network prediction
+            theta1_nn, theta2_nn = self.current_nn.predict([self.target_x, self.target_y])
+            x_nn, y_nn = direct_kinematics(theta1_nn, theta2_nn)
+            
+            # Get analytical solution for comparison
+            theta1_analytical, theta2_analytical = analytical_inverse_kinematics(self.target_x, self.target_y)
+            
+            # Calculate joint positions for NN solution
+            x1_nn = a1 * math.cos(theta1_nn)
+            y1_nn = a1 * math.sin(theta1_nn)
+            
+            # Update arm links and joints (NN solution)
+            self.link1_line.set_data([0, x1_nn], [0, y1_nn])
+            self.link2_line.set_data([x1_nn, x_nn], [y1_nn, y_nn])
+            self.joint1_point.set_data([0], [0])
+            self.joint2_point.set_data([x1_nn], [y1_nn])
+            self.end_effector_nn.set_data([x_nn], [y_nn])
+            
+            # Update target
+            self.target_point.set_data([self.target_x], [self.target_y])
+            
+            # Show analytical solution if available
+            if theta1_analytical is not None:
+                x_analytical, y_analytical = direct_kinematics(theta1_analytical, theta2_analytical)
+                self.end_effector_analytical.set_data([x_analytical], [y_analytical])
+            else:
+                self.end_effector_analytical.set_data([], [])
+            
+            # Calculate errors
+            nn_error = math.sqrt((self.target_x - x_nn)**2 + (self.target_y - y_nn)**2)
+            
+            # Update information display (formatted for left panel)
+            info_str = "═══ CURRENT STATUS ═══\n"
+            info_str += f"Target Position:\n  X: {self.target_x:.3f} cm\n  Y: {self.target_y:.3f} cm\n\n"
+            info_str += f"Neural Network Result:\n"
+            info_str += f"  θ₁: {math.degrees(theta1_nn):6.1f}°\n"
+            info_str += f"  θ₂: {math.degrees(theta2_nn):6.1f}°\n"
+            info_str += f"  Position: ({x_nn:.3f}, {y_nn:.3f})\n"
+            info_str += f"  Error: {nn_error:.4f} cm\n\n"
+            
+            if theta1_analytical is not None:
+                analytical_error = math.sqrt((self.target_x - x_analytical)**2 + (self.target_y - y_analytical)**2)
+                info_str += f"Analytical Solution:\n"
+                info_str += f"  θ₁: {math.degrees(theta1_analytical):6.1f}°\n"
+                info_str += f"  θ₂: {math.degrees(theta2_analytical):6.1f}°\n"
+                info_str += f"  Error: {analytical_error:.6f} cm"
+            else:
+                info_str += "⚠️ Target outside workspace!"
+            
+            self.info_text.set_text(info_str)
+            
+            # Redraw
+            self.fig.canvas.draw()
 
     def show_loss_plots(self, event):
         """Show training loss plots in a new window"""
@@ -581,6 +801,8 @@ class RobotArmVisualizer:
         
         # Position errors
         for method in methods:
+            if method not in self.networks:
+                continue
             nn = self.networks[method]
             errors = []
             
@@ -607,6 +829,8 @@ class RobotArmVisualizer:
         
         # Angle errors
         for method in methods:
+            if method not in self.networks:
+                continue
             nn = self.networks[method]
             angle_errors = []
             
@@ -702,15 +926,47 @@ class RobotArmVisualizer:
 
 # Main execution
 if __name__ == "__main__":
-    print("Robot Arm Inverse Kinematics Visualization")
-    print("=" * 50)
-    print("Features:")
-    print("- Interactive robot arm visualization")
-    print("- Three progressive training methods")
-    print("- Real-time NN vs analytical comparison")
-    print("- Separate windows for detailed analysis")
-    print("=" * 50)
-    
-    # Create and show the visualizer
-    visualizer = RobotArmVisualizer()
-    visualizer.show()
+    try:
+        # Run CLI interface
+        mode, network_manager = cli_interface()
+        
+        if mode == 'train':
+            print("\n🚀 Starting training session...")
+            print("This will take a few minutes. Please wait...")
+            
+            # Create visualizer with training
+            visualizer = RobotArmVisualizer(network_manager=network_manager)
+            
+        elif mode == 'load':
+            print("\n📂 Loading existing networks...")
+            networks, training_history = network_manager.load_networks()
+            
+            if not networks:
+                print("\n❌ No networks found! Starting training instead...")
+                visualizer = RobotArmVisualizer(network_manager=network_manager)
+            else:
+                print(f"✅ Successfully loaded {len(networks)} network(s)")
+                visualizer = RobotArmVisualizer(
+                    networks=networks, 
+                    training_history=training_history,
+                    network_manager=network_manager
+                )
+        
+        print("\n🎮 Interactive Controls:")
+        print("• Use sliders to adjust target position")
+        print("• Click and drag on the plot to set target position")
+        print("• Select different training methods with radio buttons")
+        print("• Use buttons to view additional analysis")
+        print("• Close the window to exit")
+        print("\n🤖 Robot arm visualization is starting...")
+        
+        # Show the visualization
+        visualizer.show()
+        
+    except KeyboardInterrupt:
+        print("\n\n👋 Program interrupted by user. Goodbye!")
+    except Exception as e:
+        print(f"\n❌ An error occurred: {e}")
+        print("Please check your Python environment and try again.")
+    finally:
+        print("\n📊 Thank you for using the Robot Arm Neural Network!")
