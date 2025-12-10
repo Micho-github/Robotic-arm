@@ -2,11 +2,26 @@ import math
 import random
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.widgets import Slider, Button, RadioButtons
-from utils.kinematics import direct_kinematics, analytical_inverse_kinematics, generate_circular_training_data, generate_quadrant_training_data, generate_full_workspace_data
-from models.neural_network import NeuralNetwork
-from utils.helpers import tanh_func, tanh_derivative, linear, linear_derivative
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (needed for 3D projection)
+from utils.kinematics import (
+    forward_kinematics_3d,
+    generate_3d_workspace_data,
+    normalize_position,
+    denormalize_angles,
+    MAX_REACH_3D,
+)
+from models.cnn_pick_place import get_trained_pick_place_cnn, generate_sample_and_predict
+from visualization.components.targets import (
+    update_target_value,
+    submit_target_value,
+    parse_and_clamp,
+)
+from visualization.components.analytics import (
+    show_loss_plots as comp_show_loss_plots,
+    show_error_comparison as comp_show_error_comparison,
+    show_training_data as comp_show_training_data,
+    run_cnn_pick_and_place as comp_run_cnn_pick_and_place,
+)
 
 # Link lengths (as specified in the project)
 a1 = 3.0  # 3 cm
@@ -15,118 +30,206 @@ a2 = 2.0  # 2 cm
 class RobotArmVisualizer:
     def __init__(self, networks=None, training_history=None, network_manager=None):
         self.networks = networks or {}
-        self.training_history = training_history or {'circle': [], 'quadrant': [], 'full': []}
+        # Training history is expected to be a dict like:
+        # {'3d': {'train_loss': [...], 'val_loss': [...], 'val_acc': [...]}}
+        self.training_history = training_history or {
+            '3d': {"train_loss": [], "val_loss": [], "val_acc": []}
+        }
         self.network_manager = network_manager
         self.current_nn = None
+        self.pick_place_cnn = None  # CNN for vision-based pick-and-place
         self.target_x = 3.0
         self.target_y = 2.0
+        self.target_z = 0.0
         self.is_dragging = False
+        self._syncing_input = False  # prevent recursive slider/text updates
 
-        # Create main figure with more space for left panel
+        # Create main figure with clearer left/right consoles and centered plot
         self.fig = plt.figure(figsize=(16, 10))
-        self.fig.suptitle('Robot Arm Inverse Kinematics - Neural Network Learning', fontsize=16, fontweight='bold')
+        # Move main title into the left console area
+        self.fig.text(
+            0.012, 0.97,
+            'Robot Arm Inverse Kinematics\nNeural Network (3D View)',
+            fontsize=13, fontweight='bold', ha='left', va='top'
+        )
 
-        # Create main robot arm plot (adjust to leave more space for left panel)
-        self.ax = self.fig.add_subplot(111)
+        # Apply shared layout (panels, borders, headers)
+        from visualization.components.layout import apply_layout
+        apply_layout(self.fig)
 
-        # Adjust the main plot to leave more space for legend and info panel
-        self.fig.subplots_adjust(left=0.28, bottom=0.25, right=0.95, top=0.92)
+        # Create main robot arm plot as a 3D axis (arm still lies in z = 0 plane)
+        self.ax = self.fig.add_subplot(111, projection='3d')
+
+        # Adjust layout: left console, central plot, right console
+        self.fig.subplots_adjust(left=0.32, bottom=0.18, right=0.75, top=0.93)
 
         self.setup_arm_plot()
         self.setup_controls()
-        self.setup_mouse_events()
+        # NOTE: Mouse-based target picking on a 3D axis is tricky to get
+        # fully correct (it requires ray casting from the camera into 3D).
+        # Our previous approach treated the 2D mouse coordinates as (x, y)
+        # directly, which works only from a fixed top-down view and becomes
+        # confusing once the user rotates the 3D camera.
+        #
+        # To keep the interaction predictable, we now rely on the X/Y/Z
+        # sliders and the "Random Target" button instead of mouse clicks.
+        # If we ever add true 3D picking, this is where we'd re-enable it.
+        # Optional: enable mouse target picking
+        # from visualization.components.interactions import connect_mouse_events
+        # connect_mouse_events(self)
 
-        # If no networks provided, train them
-        if not self.networks:
-            self.train_networks()
-        else:
-            # Prioritize full workspace network
-            if 'full' in self.networks:
-                self.current_nn = self.networks['full']
-            elif 'quadrant' in self.networks:
-                self.current_nn = self.networks['quadrant']
-            elif 'circle' in self.networks:
-                self.current_nn = self.networks['circle']
-            elif self.networks:
+        # If networks were provided (recommended), select the 3D network
+        if self.networks:
+            if '3d' in self.networks:
+                self.current_nn = self.networks['3d']
+            else:
+                # Fallback: pick the first available network
                 self.current_nn = list(self.networks.values())[0]
+        else:
+            # No networks passed in – try to load via NetworkManager if available
+            if self.network_manager is not None:
+                print("No networks provided to visualizer. Attempting to load from saved models...")
+                networks, history = self.network_manager.load_networks()
+                self.networks = networks
+                self.training_history = history or {'3d': []}
+                if '3d' in self.networks:
+                    self.current_nn = self.networks['3d']
+                elif self.networks:
+                    self.current_nn = list(self.networks.values())[0]
+
+        # If we have a network, update the plot; otherwise just show the empty arm
+        if self.current_nn is not None:
             self.update_visualization()
 
     def setup_arm_plot(self):
-        """Setup the robot arm visualization"""
+        # Set 3D axes limits (arm still lies in z = 0 plane)
         self.ax.set_xlim(-6, 6)
         self.ax.set_ylim(-6, 6)
-        self.ax.set_aspect('equal')
+        self.ax.set_zlim(-6, 6)
         self.ax.grid(True, alpha=0.3)
         self.ax.set_xlabel('X Position (cm)')
         self.ax.set_ylabel('Y Position (cm)')
+        self.ax.set_zlabel('Z Position (cm)')
 
-        # Draw workspace boundaries
-        workspace_outer = plt.Circle((0, 0), a1 + a2, fill=False, color='gray',
-                                   linestyle='--', alpha=0.7, linewidth=2, label='Workspace Boundary')
-        workspace_inner = plt.Circle((0, 0), abs(a1 - a2), fill=False, color='gray',
-                                   linestyle='--', alpha=0.5, linewidth=1)
-        self.ax.add_patch(workspace_outer)
-        self.ax.add_patch(workspace_inner)
+        # Make the box roughly cubic so rotations look nicer
+        try:
+            self.ax.set_box_aspect((1, 1, 1))
+        except Exception:
+            # Older matplotlib versions may not support set_box_aspect
+            pass
 
-        # Initialize arm elements with enhanced styling
-        self.link1_line, = self.ax.plot([], [], 'b-', linewidth=12, alpha=0.8, label='Link 1 (3cm)')
-        self.link2_line, = self.ax.plot([], [], 'r-', linewidth=8, alpha=0.8, label='Link 2 (2cm)')
+        # Reconfigure default 3D mouse controls so LEFT button is free for our own handler.
+        # - Right drag: rotate 3D view
+        # - Middle drag: pan
+        # - Scroll wheel: still zooms normally
+        try:
+            self.ax.mouse_init(rotate_btn=3, pan_btn=2, zoom_btn=3)
+        except Exception:
+            # If this fails on very old matplotlib, the plot will still work;
+            # it just means left-drag may continue to rotate the view.
+            pass
+
+        # Draw ground plane for visual reference
+        plane_extent = np.linspace(-6, 6, 10)
+        Xp, Yp = np.meshgrid(plane_extent, plane_extent)
+        Zp = np.zeros_like(Xp)
+        self.ax.plot_surface(
+            Xp, Yp, Zp,
+            color='lightgray',
+            alpha=0.15,
+            linewidth=0,
+            antialiased=False,
+            shade=False,
+        )
+
+        # Draw workspace boundaries as circles in the XY plane (z = 0)
+        theta = np.linspace(0, 2 * math.pi, 200)
+        outer_r = a1 + a2
+        inner_r = abs(a1 - a2)
+
+        outer_x = outer_r * np.cos(theta)
+        outer_y = outer_r * np.sin(theta)
+        outer_z = np.zeros_like(theta)
+
+        inner_x = inner_r * np.cos(theta)
+        inner_y = inner_r * np.sin(theta)
+        inner_z = np.zeros_like(theta)
+
+        self.workspace_outer_line, = self.ax.plot(
+            outer_x, outer_y, outer_z,
+            color='gray', linestyle='--', alpha=0.7, linewidth=2, label='Workspace Boundary'
+        )
+        self.workspace_inner_line, = self.ax.plot(
+            inner_x, inner_y, inner_z,
+            color='gray', linestyle='--', alpha=0.5, linewidth=1
+        )
+
+        # Show Z boundary as a single vertical ring (XZ plane at y=0)
+        z_min, z_max = -5.0, 5.0
+        ring_theta = np.linspace(0, 2 * math.pi, 200)
+        ring_x = outer_r * np.cos(ring_theta)
+        ring_z = np.linspace(z_min, z_max, 200)
+        # To form a vertical circle, parametrize half in +z and half in -z
+        ring_z = outer_r * np.sin(ring_theta)
+        ring_y = np.zeros_like(ring_theta)
+        self.z_ring_vertical, = self.ax.plot(
+            ring_x, ring_y, ring_z,
+            color='purple', linestyle='--', alpha=0.55, linewidth=1.4, label='Z Boundary'
+        )
+
+        # Initialize arm elements with enhanced styling (all in z = 0 plane)
+        self.link1_line, = self.ax.plot([], [], [], 'b-', linewidth=12, alpha=0.8, label='Link 1 (3cm)')
+        self.link2_line, = self.ax.plot([], [], [], 'r-', linewidth=8, alpha=0.8, label='Link 2 (2cm)')
 
         # Joints and end effector
-        self.joint1_point, = self.ax.plot([], [], 'ko', markersize=12, label='Base Joint')
-        self.joint2_point, = self.ax.plot([], [], 'go', markersize=10, label='Elbow Joint')
-        self.end_effector_nn, = self.ax.plot([], [], 'mo', markersize=12, label='NN End Effector')
-        self.end_effector_analytical, = self.ax.plot([], [], 'co', markersize=10,
+        self.joint1_point, = self.ax.plot([], [], [], 'ko', markersize=12, label='Base Joint')
+        self.joint2_point, = self.ax.plot([], [], [], 'go', markersize=10, label='Elbow Joint')
+        self.end_effector_nn, = self.ax.plot([], [], [], 'mo', markersize=12, markeredgecolor='k', label='NN End Effector')
+        self.end_effector_analytical, = self.ax.plot([], [], [], 'co', markersize=10,
                                                    markerfacecolor='none', markeredgewidth=2,
                                                    label='Analytical Solution')
-        self.target_point, = self.ax.plot([], [], 'r*', markersize=20, label='Target Position')
+        self.target_point, = self.ax.plot([], [], [], 'r*', markersize=20, markeredgecolor='k', label='Target Position')
 
-        # Create legend on the left side
+        # Create legend in the upper-left info column
         self.legend = self.fig.legend(
             [self.link1_line, self.link2_line, self.joint1_point, self.joint2_point,
-             self.end_effector_nn, self.end_effector_analytical, self.target_point, workspace_outer],
+             self.end_effector_nn, self.end_effector_analytical, self.target_point,
+             self.workspace_outer_line],
             ['Link 1 (3cm)', 'Link 2 (2cm)', 'Base Joint', 'Elbow Joint',
              'NN End Effector', 'Analytical Solution', 'Target Position', 'Workspace Boundary'],
-            loc='center left',
-            bbox_to_anchor=(0.05, 0.4),
+            loc='upper left',
+            bbox_to_anchor=(0.012, 0.30, 0.216, 0.0),
+            bbox_transform=self.fig.transFigure,
             fontsize=10,
             frameon=True,
             fancybox=True,
-            shadow=True,
-            framealpha=0.9
+            framealpha=0.95,
+            facecolor='white',
+            edgecolor='#c4c4cc'
         )
 
-        # Add information display text on the left side (below the legend)
-        self.info_text = self.fig.text(0.80, 0.75, '', fontsize=9,
-                                     verticalalignment='top',
-                                     horizontalalignment='left',
-                                     bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray", alpha=0.8),
-                                     family='monospace')
+        # Add information display text in the left column below the legend
+        self.info_text = self.fig.text(
+            0.012, 0.71, '', fontsize=10,
+            verticalalignment='top',
+            horizontalalignment='left',
+            bbox=dict(
+                boxstyle="round,pad=0.4",
+                facecolor="white",
+                edgecolor="#c4c4cc",
+                linewidth=1.0,
+                alpha=0.95
+            ),
+            family='monospace'
+        )
 
-    def setup_mouse_events(self):
-        """Setup mouse event handlers for interactive target setting"""
-        # Connect mouse events to the main plot axes
-        self.fig.canvas.mpl_connect('button_press_event', self.on_mouse_press)
-        self.fig.canvas.mpl_connect('button_release_event', self.on_mouse_release)
-        self.fig.canvas.mpl_connect('motion_notify_event', self.on_mouse_motion)
-
-    def on_mouse_press(self, event):
-        """Handle mouse press events"""
-        # Only respond to clicks within the main robot arm plot
-        if event.inaxes == self.ax and event.button == 1:  # Left mouse button
-            self.is_dragging = True
-            self.update_target_from_mouse(event)
-
-    def on_mouse_release(self, event):
-        """Handle mouse release events"""
-        if event.button == 1:  # Left mouse button
-            self.is_dragging = False
-
-    def on_mouse_motion(self, event):
-        """Handle mouse motion events"""
-        # Only update target if we're dragging and mouse is in the main plot
-        if self.is_dragging and event.inaxes == self.ax:
-            self.update_target_from_mouse(event)
+    def reset_view(self, event):
+        """Reset the 3D view to the default elevation/azimuth."""
+        try:
+            self.ax.view_init(elev=self.default_elev, azim=self.default_azim)
+            self.fig.canvas.draw_idle()
+        except Exception:
+            pass
 
     def update_target_from_mouse(self, event):
         """Update target position based on mouse coordinates"""
@@ -168,130 +271,95 @@ class RobotArmVisualizer:
 
     def setup_controls(self):
         """Setup interactive controls"""
-        # Training method selection (positioned below info display)
-        available_methods = []
-        method_labels = []
+        # Build controls via helper to keep this method small
+        from visualization.components.ui_controls import build_controls
 
-        # Add methods in priority order (full workspace first)
-        if 'full' in self.networks:
-            available_methods.append('full')
-            method_labels.append('Full Workspace')
-        if 'quadrant' in self.networks:
-            available_methods.append('quadrant')
-            method_labels.append('Quadrant Training')
-        if 'circle' in self.networks:
-            available_methods.append('circle')
-            method_labels.append('Circle Training')
+        ctrl = build_controls(
+            self.fig,
+            callbacks={
+                "update_target_x": self.update_target_x,
+                "update_target_y": self.update_target_y,
+                "update_target_z": self.update_target_z,
+                "submit_target_x": self.submit_target_x,
+                "submit_target_y": self.submit_target_y,
+                "submit_target_z": self.submit_target_z,
+                "generate_random_target": self.generate_random_target,
+                "show_loss_plots": self.show_loss_plots,
+                "show_error_comparison": self.show_error_comparison,
+                "show_training_data": self.show_training_data,
+                "run_cnn_pick_and_place": self.run_cnn_pick_and_place,
+                "reset_view": self.reset_view,
+            },
+            initial_values={
+                "x": self.target_x,
+                "y": self.target_y,
+                "z": self.target_z,
+            },
+        )
 
-        if method_labels:
-            ax_radio = plt.axes([0.03, 0.1, 0.18, 0.15])
-            self.radio = RadioButtons(ax_radio, method_labels)
-            self.radio.on_clicked(self.change_training_method)
-            # Set default selection to Full Workspace if available
-            if 'Full Workspace' in method_labels:
-                self.radio.set_active(method_labels.index('Full Workspace'))
+        self.slider_x = ctrl["sliders"]["x"]
+        self.slider_y = ctrl["sliders"]["y"]
+        self.slider_z = ctrl["sliders"]["z"]
+        self.text_x = ctrl["texts"]["x"]
+        self.text_y = ctrl["texts"]["y"]
+        self.text_z = ctrl["texts"]["z"]
 
-        # Target X slider
-        ax_x = plt.axes([0.76, 0.40, 0.2, 0.03])
-        self.slider_x = Slider(ax_x, 'Target X', -5.0, 5.0, valinit=self.target_x, valfmt='%.2f')
-        self.slider_x.on_changed(self.update_target_x)
+        self.action_axes = ctrl["action_axes"]
+        self.action_buttons = ctrl["action_buttons"]
+        # No toggle button in the new layout; keep attribute for compatibility
+        self.btn_toggle_actions = None
+        self.actions_visible = True
+        self.set_actions_visibility(True)
 
-        # Target Y slider
-        ax_y = plt.axes([0.76, 0.35, 0.2, 0.03])
-        self.slider_y = Slider(ax_y, 'Target Y', -5.0, 5.0, valinit=self.target_y, valfmt='%.2f')
-        self.slider_y.on_changed(self.update_target_y)
-
-        # Control buttons in 2x2 grid
-        # First row
-        ax_random = plt.axes([0.76, 0.30, 0.10, 0.03])
-        self.btn_random = Button(ax_random, 'Random Target')
-        self.btn_random.on_clicked(self.generate_random_target)
-
-        ax_loss = plt.axes([0.87, 0.30, 0.10, 0.03])
-        self.btn_loss = Button(ax_loss, 'Show Loss Plots')
-        self.btn_loss.on_clicked(self.show_loss_plots)
-
-        # Second row
-        ax_comparison = plt.axes([0.815, 0.25, 0.11, 0.03])
-        self.btn_comparison = Button(ax_comparison, 'Show Error Comparison')
-        self.btn_comparison.on_clicked(self.show_error_comparison)
-
-        ax_workspace = plt.axes([0.815, 0.20, 0.11, 0.03])
-        self.btn_workspace = Button(ax_workspace, 'Show Training Data')
-        self.btn_workspace.on_clicked(self.show_training_data)
-
-    def train_networks(self):
-        """Train neural networks with different datasets"""
-        print("Training Neural Networks with Progressive Complexity...")
-        print("=" * 60)
-
-        training_configs = {
-            'circle': {'data_func': generate_circular_training_data, 'epochs': 150},
-            'quadrant': {'data_func': generate_quadrant_training_data, 'epochs': 150},
-            'full': {'data_func': generate_full_workspace_data, 'epochs': 200}
-        }
-
-        for training_type, config in training_configs.items():
-            print(f"\nTraining network on {training_type} data...")
-
-            # Create and configure network
-            nn = NeuralNetwork()
-            nn.learning_rate = 0.001
-            nn.add_layer(64, tanh_func, tanh_derivative)
-            nn.add_layer(64, tanh_func, tanh_derivative)
-            nn.add_layer(2, linear, linear_derivative)
-            nn.initialize_network(input_size=2)
-
-            # Generate training data and train
-            training_data = config['data_func']()
-            losses = nn.train(training_data, epochs=config['epochs'])
-
-            # Store results
-            self.networks[training_type] = nn
-            self.training_history[training_type] = losses
-
-        # Save networks after training
-        if self.network_manager:
-            print("\n" + "=" * 60)
-            print("💾 Saving trained networks...")
-            self.network_manager.save_networks(self.networks, self.training_history)
-            print("✅ All networks saved successfully!")
-
-        # Set default to full workspace network
-        self.current_nn = self.networks['full']
-        self.update_visualization()
-
-    def change_training_method(self, label):
-        """Change the active neural network"""
-        method_map = {
-            'Circle Training': 'circle',
-            'Quadrant Training': 'quadrant',
-            'Full Workspace': 'full'
-        }
-        network_key = method_map.get(label)
-        if network_key and network_key in self.networks:
-            self.current_nn = self.networks[network_key]
-            self.update_visualization()
+    def set_actions_visibility(self, visible):
+        """Show or hide action buttons."""
+        for ax in self.action_axes:
+            ax.set_visible(visible)
+        for btn in self.action_buttons:
+            try:
+                btn.eventson = visible
+            except Exception:
+                pass
+        self.fig.canvas.draw_idle()
 
     def update_target_x(self, val):
-        self.target_x = val
-        self.update_visualization()
+        update_target_value(self, 'x', val)
 
     def update_target_y(self, val):
-        self.target_y = val
-        self.update_visualization()
+        update_target_value(self, 'y', val)
+
+    def update_target_z(self, val):
+        update_target_value(self, 'z', val)
+
+    def submit_target_x(self, text):
+        """Handle manual text input for X."""
+        submit_target_value(self, 'x', text)
+
+    def submit_target_y(self, text):
+        """Handle manual text input for Y."""
+        submit_target_value(self, 'y', text)
+
+    def submit_target_z(self, text):
+        """Handle manual text input for Z."""
+        submit_target_value(self, 'z', text)
 
     def generate_random_target(self, event):
-        """Generate a random target within the workspace"""
-        angle = random.uniform(0, 2 * math.pi)
-        radius = random.uniform(abs(a1 - a2) + 0.5, a1 + a2 - 0.5)
+        """Generate a random reachable 3D target by sampling random joint angles
+        (using the same restricted ranges as training data)"""
+        theta1 = random.uniform(-math.pi, math.pi)
+        theta2 = random.uniform(-math.pi / 4, math.pi / 2)  # same as training: -45° to +90°
+        theta3 = random.uniform(-math.pi / 2, 0)            # same as training: bends inward
 
-        self.target_x = radius * math.cos(angle)
-        self.target_y = radius * math.sin(angle)
+        x, y, z = forward_kinematics_3d(theta1, theta2, theta3)
+
+        self.target_x = x
+        self.target_y = y
+        self.target_z = z
 
         # Update sliders
         self.slider_x.set_val(self.target_x)
         self.slider_y.set_val(self.target_y)
+        self.slider_z.set_val(self.target_z)
 
         self.update_visualization()
 
@@ -300,221 +368,112 @@ class RobotArmVisualizer:
         if self.current_nn is None:
             return
 
-        # Constrain target to workspace
-        distance = math.sqrt(self.target_x**2 + self.target_y**2)
-        if distance > a1 + a2 - 0.1:
-            scale = (a1 + a2 - 0.1) / distance
+        # Constrain target to reachable 3D sphere; if out of range, project to the
+        # nearest point in the same direction so the arm “reaches as far as it can”.
+        max_reach = MAX_REACH_3D - 0.1  # slight margin
+        dist_3d = math.sqrt(self.target_x**2 + self.target_y**2 + self.target_z**2)
+        if dist_3d > max_reach and dist_3d > 1e-6:
+            scale = max_reach / dist_3d
             self.target_x *= scale
             self.target_y *= scale
+            self.target_z *= scale
+        # If clamped, reflect in the inputs
+        self.sync_inputs_to_targets()
 
-        # Get neural network prediction
-        theta1_nn, theta2_nn = self.current_nn.predict([self.target_x, self.target_y])
-        x_nn, y_nn = direct_kinematics(theta1_nn, theta2_nn)
 
-        # Get analytical solution for comparison
-        theta1_analytical, theta2_analytical = analytical_inverse_kinematics(self.target_x, self.target_y)
+        # Normalize target position for NN input
+        x_norm, y_norm, z_norm = normalize_position(
+            self.target_x, self.target_y, self.target_z
+        )
 
-        # Calculate joint positions for NN solution
-        x1_nn = a1 * math.cos(theta1_nn)
-        y1_nn = a1 * math.sin(theta1_nn)
+        # Get neural network prediction (normalized angles)
+        t1_norm, t2_norm, t3_norm = self.current_nn.predict([x_norm, y_norm, z_norm])
 
-        # Update arm links and joints (NN solution)
-        self.link1_line.set_data([0, x1_nn], [0, y1_nn])
-        self.link2_line.set_data([x1_nn, x_nn], [y1_nn, y_nn])
-        self.joint1_point.set_data([0], [0])
-        self.joint2_point.set_data([x1_nn], [y1_nn])
-        self.end_effector_nn.set_data([x_nn], [y_nn])
+        # Denormalize angles back to radians
+        theta1_nn, theta2_nn, theta3_nn = denormalize_angles(t1_norm, t2_norm, t3_norm)
+
+        # End-effector position from predicted angles
+        x_nn, y_nn, z_nn = forward_kinematics_3d(theta1_nn, theta2_nn, theta3_nn)
+
+        # Joint position between links (shoulder to elbow)
+        r1 = a1 * math.cos(theta2_nn)
+        z1 = a1 * math.sin(theta2_nn)
+        x1_nn = r1 * math.cos(theta1_nn)
+        y1_nn = r1 * math.sin(theta1_nn)
+
+        # Update arm links and joints (NN solution) in 3D
+        self.link1_line.set_data_3d([0, x1_nn], [0, y1_nn], [0, z1])
+        self.link2_line.set_data_3d([x1_nn, x_nn], [y1_nn, y_nn], [z1, z_nn])
+        self.joint1_point.set_data_3d([0], [0], [0])
+        self.joint2_point.set_data_3d([x1_nn], [y1_nn], [z1])
+        self.end_effector_nn.set_data_3d([x_nn], [y_nn], [z_nn])
 
         # Update target
-        self.target_point.set_data([self.target_x], [self.target_y])
+        self.target_point.set_data_3d([self.target_x], [self.target_y], [self.target_z])
 
-        # Show analytical solution if available
-        if theta1_analytical is not None:
-            x_analytical, y_analytical = direct_kinematics(theta1_analytical, theta2_analytical)
-            self.end_effector_analytical.set_data([x_analytical], [y_analytical])
-        else:
-            self.end_effector_analytical.set_data([], [])
-
-        # Calculate errors
-        nn_error = math.sqrt((self.target_x - x_nn)**2 + (self.target_y - y_nn)**2)
+        # Calculate 3D position error between target and NN end-effector
+        nn_error = math.sqrt(
+            (self.target_x - x_nn) ** 2 +
+            (self.target_y - y_nn) ** 2 +
+            (self.target_z - z_nn) ** 2
+        )
 
         # Update information display (formatted for left panel)
-        info_str = "═══ CURRENT STATUS ═══\n"
-        info_str += f"Target Position:\n  X: {self.target_x:.3f} cm\n  Y: {self.target_y:.3f} cm\n\n"
-        info_str += f"Neural Network Result:\n"
-        info_str += f"  θ₁: {math.degrees(theta1_nn):6.1f}°\n"
-        info_str += f"  θ₂: {math.degrees(theta2_nn):6.1f}°\n"
-        info_str += f"  Position: ({x_nn:.3f}, {y_nn:.3f})\n"
-        info_str += f"  Error: {nn_error:.4f} cm\n\n"
-
-        if theta1_analytical is not None:
-            analytical_error = math.sqrt((self.target_x - x_analytical)**2 + (self.target_y - y_analytical)**2)
-            info_str += f"Analytical Solution:\n"
-            info_str += f"  θ₁: {math.degrees(theta1_analytical):6.1f}°\n"
-            info_str += f"  θ₂: {math.degrees(theta2_analytical):6.1f}°\n"
-            info_str += f"  Error: {analytical_error:.6f} cm"
-        else:
-            info_str += "⚠️ Target outside workspace!"
+        info_str = (
+            "Target Position:\n"
+            f"  X: $\\mathbf{{{self.target_x:.3f}}}$ cm\n"
+            f"  Y: $\\mathbf{{{self.target_y:.3f}}}$ cm\n"
+            f"  Z: $\\mathbf{{{self.target_z:.3f}}}$ cm\n\n"
+            "Neural Network Result:\n"
+            f"  θ₁ (base):     $\\mathbf{{{math.degrees(theta1_nn):6.1f}}}$°\n"
+            f"  θ₂ (shoulder): $\\mathbf{{{math.degrees(theta2_nn):6.1f}}}$°\n"
+            f"  θ₃ (elbow):    $\\mathbf{{{math.degrees(theta3_nn):6.1f}}}$°\n"
+            f"  Position: ($\\mathbf{{{x_nn:.3f}}}$, $\\mathbf{{{y_nn:.3f}}}$, $\\mathbf{{{z_nn:.3f}}}$)\n"
+            f"  3D Error: $\\mathbf{{{nn_error:.4f}}}$ cm"
+        )
 
         self.info_text.set_text(info_str)
 
         # Redraw
         self.fig.canvas.draw()
 
+    def sync_inputs_to_targets(self):
+        """Update sliders and text boxes to reflect current target values without recursion."""
+        self._syncing_input = True
+        try:
+            try:
+                self.slider_x.set_val(self.target_x)
+                self.slider_y.set_val(self.target_y)
+                self.slider_z.set_val(self.target_z)
+            except Exception:
+                pass
+            try:
+                self.text_x.set_val(f"{self.target_x:.2f}")
+                self.text_y.set_val(f"{self.target_y:.2f}")
+                self.text_z.set_val(f"{self.target_z:.2f}")
+            except Exception:
+                pass
+        finally:
+            self._syncing_input = False
+
     def show_loss_plots(self, event):
-        """Show training loss plots in a new window"""
-        fig_loss, ax_loss = plt.subplots(figsize=(10, 6))
-        fig_loss.suptitle('Neural Network Training Loss Comparison', fontsize=14, fontweight='bold')
-
-        colors = {'circle': 'blue', 'quadrant': 'green', 'full': 'red'}
-
-        for method, losses in self.training_history.items():
-            if losses:
-                ax_loss.plot(losses, color=colors[method], linewidth=2,
-                           label=f'{method.capitalize()} Training', alpha=0.8)
-
-        ax_loss.set_xlabel('Epoch')
-        ax_loss.set_ylabel('Mean Squared Error Loss')
-        ax_loss.set_yscale('log')
-        ax_loss.grid(True, alpha=0.3)
-        ax_loss.legend()
-        ax_loss.set_title('Training Loss Over Time')
-
-        plt.tight_layout()
-        plt.show()
+        """Show training loss and accuracy in a new window."""
+        comp_show_loss_plots(self, event)
 
     def show_error_comparison(self, event):
-        """Show error comparison plots in a new window"""
-        fig_error, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-        fig_error.suptitle('Neural Network vs Analytical Solution Comparison', fontsize=14, fontweight='bold')
-
-        # Generate test points on a circle
-        test_radius = 3.0
-        test_points = 50
-        angles = np.linspace(0, 2*math.pi, test_points)
-
-        methods = ['circle', 'quadrant', 'full']
-        colors = {'circle': 'blue', 'quadrant': 'green', 'full': 'red'}
-
-        # Position errors
-        for method in methods:
-            if method not in self.networks:
-                continue
-            nn = self.networks[method]
-            errors = []
-
-            for angle in angles:
-                x_test = test_radius * math.cos(angle)
-                y_test = test_radius * math.sin(angle)
-
-                # Get NN prediction
-                theta1_nn, theta2_nn = nn.predict([x_test, y_test])
-                x_nn, y_nn = direct_kinematics(theta1_nn, theta2_nn)
-
-                # Calculate position error
-                error = math.sqrt((x_test - x_nn)**2 + (y_test - y_nn)**2)
-                errors.append(error)
-
-            ax1.plot(angles, errors, color=colors[method], linewidth=2,
-                    label=f'{method.capitalize()} NN', alpha=0.8)
-
-        ax1.set_xlabel('Angle (radians)')
-        ax1.set_ylabel('Position Error (cm)')
-        ax1.set_title('Position Error vs Target Angle')
-        ax1.grid(True, alpha=0.3)
-        ax1.legend()
-
-        # Angle errors
-        for method in methods:
-            if method not in self.networks:
-                continue
-            nn = self.networks[method]
-            angle_errors = []
-
-            for angle in angles:
-                x_test = test_radius * math.cos(angle)
-                y_test = test_radius * math.sin(angle)
-
-                # Get analytical solution
-                theta1_analytical, theta2_analytical = analytical_inverse_kinematics(x_test, y_test)
-
-                if theta1_analytical is not None:
-                    # Get NN prediction
-                    theta1_nn, theta2_nn = nn.predict([x_test, y_test])
-
-                    # Calculate angle differences
-                    angle_error = math.sqrt((theta1_analytical - theta1_nn)**2 + (theta2_analytical - theta2_nn)**2)
-                    angle_errors.append(math.degrees(angle_error))
-                else:
-                    angle_errors.append(0)
-
-            ax2.plot(angles, angle_errors, color=colors[method], linewidth=2,
-                    label=f'{method.capitalize()} NN', alpha=0.8)
-
-        ax2.set_xlabel('Angle (radians)')
-        ax2.set_ylabel('Joint Angle Error (degrees)')
-        ax2.set_title('Joint Angle Error vs Target Angle')
-        ax2.grid(True, alpha=0.3)
-        ax2.legend()
-
-        plt.tight_layout()
-        plt.show()
+        """Show a simple 3D error comparison for the current network"""
+        comp_show_error_comparison(self, event)
 
     def show_training_data(self, event):
-        """Show training data visualization in a new window"""
-        fig_data, axes = plt.subplots(2, 2, figsize=(12, 10))
-        fig_data.suptitle('Training Data Visualization', fontsize=14, fontweight='bold')
+        """Show 3D training data visualization in a new window"""
+        comp_show_training_data(event)
 
-        # Generate and plot different training datasets
-        datasets = {
-            'Circle': generate_circular_training_data(),
-            'Quadrant': generate_quadrant_training_data(),
-            'Full Workspace': generate_full_workspace_data(num_samples=1000)
-        }
-
-        colors = {'Circle': 'blue', 'Quadrant': 'green', 'Full Workspace': 'red'}
-
-        # Plot training data points
-        ax_combined = axes[0, 0]
-        for name, data in datasets.items():
-            x_points = [point[0][0] for point in data]
-            y_points = [point[0][1] for point in data]
-            ax_combined.scatter(x_points, y_points, c=colors[name], alpha=0.6, s=1, label=name)
-
-        ax_combined.set_title('Training Data Distribution')
-        ax_combined.set_xlabel('X Position')
-        ax_combined.set_ylabel('Y Position')
-        ax_combined.set_aspect('equal')
-        ax_combined.grid(True, alpha=0.3)
-        ax_combined.legend()
-
-        # Add workspace boundary
-        workspace_circle = plt.Circle((0, 0), a1 + a2, fill=False, color='gray', linestyle='--')
-        ax_combined.add_patch(workspace_circle)
-
-        # Individual dataset plots
-        plot_configs = [
-            (axes[0, 1], 'Circle', datasets['Circle']),
-            (axes[1, 0], 'Quadrant', datasets['Quadrant']),
-            (axes[1, 1], 'Full Workspace', datasets['Full Workspace'])
-        ]
-
-        for ax, name, data in plot_configs:
-            x_points = [point[0][0] for point in data]
-            y_points = [point[0][1] for point in data]
-            ax.scatter(x_points, y_points, c=colors[name], alpha=0.8, s=2)
-            ax.set_title(f'{name} Training Data')
-            ax.set_xlabel('X Position')
-            ax.set_ylabel('Y Position')
-            ax.set_aspect('equal')
-            ax.grid(True, alpha=0.3)
-
-            # Add workspace boundary
-            workspace_circle = plt.Circle((0, 0), a1 + a2, fill=False, color='gray', linestyle='--')
-            ax.add_patch(workspace_circle)
-
-        plt.tight_layout()
-        plt.show()
+    def run_cnn_pick_and_place(self, event):
+        """
+        Use the CNN to detect a block in a synthetic image and move the arm
+        to the predicted (x, y) position (with a fixed Z height).
+        """
+        comp_run_cnn_pick_and_place(self, event)
 
     def show(self):
         """Display the main robot arm visualization"""

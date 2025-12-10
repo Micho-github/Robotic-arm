@@ -1,172 +1,330 @@
+import os
 import math
-import random
-import pickle
-from utils.helpers import relu, relu_derivative, linear, linear_derivative, tanh_func, tanh_derivative
+import time
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
 
-class Node:
-    def __init__(self, activation_func=relu, activation_derivative=relu_derivative):
-        self.weights = []
-        self.bias = random.uniform(-0.5, 0.5)
-        self.output = 0
-        self.delta = 0
-        self.activation_func = activation_func
-        self.activation_derivative = activation_derivative
-        self.z = 0
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from utils.kinematics import (
+    generate_3d_workspace_data,
+    forward_kinematics_3d,
+    denormalize_angles,
+    MAX_REACH_3D,
+    normalize_position,
+)
 
-    def initialize_weights(self, num_inputs):
-        # Xavier initialization
-        limit = math.sqrt(6.0 / num_inputs)
-        self.weights = [random.uniform(-limit, limit) for _ in range(num_inputs)]
+a1 = 3.0
+a2 = 2.0
 
-    def forward(self, inputs):
-        self.z = sum(w * x for w, x in zip(self.weights, inputs)) + self.bias
-        self.output = self.activation_func(self.z)
-        return self.output
+def forward_kinematics_pytorch(theta1, theta2, theta3):
+    """Differentiable 3D forward kinematics used inside the loss."""
+    r = a1 * torch.cos(theta2) + a2 * torch.cos(theta2 + theta3)
+    z = a1 * torch.sin(theta2) + a2 * torch.sin(theta2 + theta3)
 
-class Layer:
-    def __init__(self, num_nodes, activation_func=relu, activation_derivative=relu_derivative):
-        self.nodes = [Node(activation_func, activation_derivative) for _ in range(num_nodes)]
-        self.outputs = []
+    x = r * torch.cos(theta1)
+    y = r * torch.sin(theta1)
 
-    def initialize_weights(self, num_inputs):
-        for node in self.nodes:
-            node.initialize_weights(num_inputs)
+    return torch.stack([x, y, z], dim=1)
 
-    def forward(self, inputs):
-        self.outputs = [node.forward(inputs) for node in self.nodes]
-        return self.outputs
 
-class NeuralNetwork:
-    def __init__(self):
-        self.layers = []
-        self.learning_rate = 0.001
-        self.architecture = []  # Store architecture info for reconstruction
+class IKNetwork3D(nn.Module):
+    def __init__(self, hidden_size=256):
+        super(IKNetwork3D, self).__init__()
+        self.network = nn.Sequential(
+            nn.Linear(3, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, 3),  # linear output (no activation)
+        )
 
-    def add_layer(self, num_nodes, activation_func=relu, activation_derivative=relu_derivative):
-        layer = Layer(num_nodes, activation_func, activation_derivative)
-        self.layers.append(layer)
-
-        # Store architecture info
-        func_name = activation_func.__name__ if hasattr(activation_func, '__name__') else 'unknown'
-        self.architecture.append({
-            'num_nodes': num_nodes,
-            'activation': func_name
-        })
-
-    def initialize_network(self, input_size):
-        prev_size = input_size
-        for layer in self.layers:
-            layer.initialize_weights(prev_size)
-            prev_size = len(layer.nodes)
-
-    def forward_propagation(self, inputs):
-        current_inputs = inputs
-        for layer in self.layers:
-            current_inputs = layer.forward(current_inputs)
-        return current_inputs
-
-    def backward_propagation(self, inputs, targets):
-        # Calculate output layer deltas
-        output_layer = self.layers[-1]
-        for i, node in enumerate(output_layer.nodes):
-            error = targets[i] - node.output
-            node.delta = error * node.activation_derivative(node.z)
-
-        # Calculate hidden layer deltas
-        for layer_idx in range(len(self.layers) - 2, -1, -1):
-            current_layer = self.layers[layer_idx]
-            next_layer = self.layers[layer_idx + 1]
-
-            for i, node in enumerate(current_layer.nodes):
-                error = sum(next_node.weights[i] * next_node.delta
-                           for next_node in next_layer.nodes)
-                node.delta = error * node.activation_derivative(node.z)
-
-        # Update weights and biases
-        current_inputs = inputs
-        for layer in self.layers:
-            for node in layer.nodes:
-                for j in range(len(node.weights)):
-                    node.weights[j] += self.learning_rate * node.delta * current_inputs[j]
-                node.bias += self.learning_rate * node.delta
-            current_inputs = layer.outputs
-
-    def train(self, training_data, epochs=100):
-        losses = []
-        for epoch in range(epochs):
-            epoch_loss = 0
-            for inputs, targets in training_data:
-                outputs = self.forward_propagation(inputs)
-                loss = sum((target - output) ** 2 for target, output in zip(targets, outputs)) / len(targets)
-                epoch_loss += loss
-                self.backward_propagation(inputs, targets)
-
-            avg_loss = epoch_loss / len(training_data)
-            losses.append(avg_loss)
-
-            if epoch % 20 == 0:
-                print(f"Epoch {epoch+1}, Loss: {avg_loss:.6f}")
-
-        return losses
+    def forward(self, x):
+        return self.network(x)
 
     def predict(self, inputs):
-        return self.forward_propagation(inputs)
+        self.eval()
+        with torch.no_grad():
+            if not isinstance(inputs, torch.Tensor):
+                inputs = torch.tensor(inputs, dtype=torch.float32)
+            if inputs.dim() == 1:
+                inputs = inputs.unsqueeze(0)
+            output = self.forward(inputs)
+            return tuple(output.squeeze().tolist())
 
-    def save_to_file(self, filename):
-        """Save the neural network to a file"""
-        save_data = {
-            'architecture': self.architecture,
-            'learning_rate': self.learning_rate,
-            'weights_and_biases': []
-        }
 
-        # Extract weights and biases from each layer
-        for layer in self.layers:
-            layer_data = []
-            for node in layer.nodes:
-                layer_data.append({
-                    'weights': node.weights.copy(),
-                    'bias': node.bias
-                })
-            save_data['weights_and_biases'].append(layer_data)
+def train_ik_network(
+    num_samples=10000,
+    hidden_size=256,
+    epochs=150,
+    batch_size=64,
+    learning_rate=0.001,
+    verbose=True,
+):
+    if verbose:
+        print("Generating training data...")
+    raw_data = generate_3d_workspace_data(num_samples=num_samples)
 
-        # Save to file
-        with open(filename, 'wb') as f:
-            pickle.dump(save_data, f)
+    # Convert to tensors
+    inputs = torch.tensor([d[0] for d in raw_data], dtype=torch.float32)
+    targets = torch.tensor([d[1] for d in raw_data], dtype=torch.float32)
 
-    @classmethod
-    def load_from_file(cls, filename):
-        """Load a neural network from a file"""
-        with open(filename, 'rb') as f:
-            save_data = pickle.load(f)
+    dataset = TensorDataset(inputs, targets)
 
-        # Create new network
-        nn = cls()
-        nn.learning_rate = save_data['learning_rate']
+    train_size = int(0.8 * len(dataset))
+    test_size = len(dataset) - train_size
+    train_dataset, test_dataset = torch.utils.data.random_split(
+        dataset,
+        [train_size, test_size],
+        generator=torch.Generator().manual_seed(42),  # reproducible split
+    )
 
-        # Reconstruct architecture
-        activation_map = {
-            'relu': (relu, relu_derivative),
-            'linear': (linear, linear_derivative),
-            'tanh_func': (tanh_func, tanh_derivative)
-        }
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-        for layer_info in save_data['architecture']:
-            activation_name = layer_info['activation']
-            if activation_name in activation_map:
-                activation_func, activation_derivative = activation_map[activation_name]
-            else:
-                activation_func, activation_derivative = relu, relu_derivative
+    model = IKNetwork3D(hidden_size=hidden_size)
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-            nn.add_layer(layer_info['num_nodes'], activation_func, activation_derivative)
+    losses = []
+    val_losses = []
+    val_accs = []
 
-        # Initialize network structure
-        nn.initialize_network(input_size=2)
+    if verbose:
+        print(f"Training PyTorch IK Network with Physics-Informed Loss...")
+        print(f"  Architecture: 3 → {hidden_size} → {hidden_size} → {hidden_size} → 3")
+        print(f"  Samples: {num_samples} (train {train_size}, test {test_size}), Epochs: {epochs}, Batch size: {batch_size}")
+        print("=" * 60)
 
-        # Load weights and biases
-        for layer_idx, layer_data in enumerate(save_data['weights_and_biases']):
-            for node_idx, node_data in enumerate(layer_data):
-                nn.layers[layer_idx].nodes[node_idx].weights = node_data['weights']
-                nn.layers[layer_idx].nodes[node_idx].bias = node_data['bias']
+    total_train_batches = len(train_loader)
+    total_train_samples = len(train_dataset)
 
-        return nn
+    start_time = time.time()
+
+    for epoch in range(epochs):
+        model.train()
+        epoch_loss = 0.0
+        epoch_correct = 0
+        epoch_total = 0
+        num_batches = 0
+
+        for batch_inputs, batch_target_angles in train_loader:
+            optimizer.zero_grad()
+
+            pred_angles_norm = model(batch_inputs)
+
+            loss_angles = criterion(pred_angles_norm, batch_target_angles)
+
+            t1 = pred_angles_norm[:, 0] * math.pi
+            t2 = pred_angles_norm[:, 1] * math.pi
+            t3 = pred_angles_norm[:, 2] * math.pi
+
+            pred_xyz_cm = forward_kinematics_pytorch(t1, t2, t3)
+
+            target_xyz_cm = batch_inputs * MAX_REACH_3D
+
+            loss_position = criterion(pred_xyz_cm, target_xyz_cm)
+
+            total_loss = loss_angles + (loss_position * 10.0)
+
+            total_loss.backward()
+            optimizer.step()
+
+            epoch_loss += total_loss.item()
+            batch_errors = torch.norm(pred_xyz_cm - target_xyz_cm, dim=1)
+            epoch_correct += (batch_errors <= 1.0).sum().item()
+            epoch_total += batch_errors.numel()
+            num_batches += 1
+
+        avg_loss = epoch_loss / num_batches
+        losses.append(avg_loss)
+
+        model.eval()
+        with torch.no_grad():
+            val_epoch_loss = 0.0
+            val_correct = 0
+            val_total = 0
+            val_batches = 0
+            for val_inputs, val_target_angles in test_loader:
+                pred_angles_norm = model(val_inputs)
+
+                loss_angles = criterion(pred_angles_norm, val_target_angles)
+
+                t1 = pred_angles_norm[:, 0] * math.pi
+                t2 = pred_angles_norm[:, 1] * math.pi
+                t3 = pred_angles_norm[:, 2] * math.pi
+                pred_xyz_cm = forward_kinematics_pytorch(t1, t2, t3)
+                target_xyz_cm = val_inputs * MAX_REACH_3D
+                loss_position = criterion(pred_xyz_cm, target_xyz_cm)
+
+                total_loss = loss_angles + (loss_position * 10.0)
+                val_epoch_loss += total_loss.item()
+                batch_errors = torch.norm(pred_xyz_cm - target_xyz_cm, dim=1)
+                val_correct += (batch_errors <= 1.0).sum().item()
+                val_total += batch_errors.numel()
+                val_batches += 1
+
+            val_avg_loss = val_epoch_loss / max(1, val_batches)
+            val_losses.append(val_avg_loss)
+
+        if verbose:
+            val_acc = (val_correct / max(1, val_total)) * 100.0
+            val_accs.append(val_acc)
+
+            elapsed = time.time() - start_time
+            epochs_done = epoch + 1
+            remaining_epochs = epochs - epochs_done
+            eta_sec = (elapsed / max(1, epochs_done)) * remaining_epochs
+            eta_min = int(eta_sec // 60)
+            eta_s = int(eta_sec % 60)
+
+            print(
+                f"Epoch {epoch + 1:3d}/{epochs}  "
+                f"samples: {total_train_samples:6d}  "
+                f"Loss: {val_avg_loss:.6f}  "
+                f"Acc<=1cm: {val_acc:5.1f}%  "
+                f"ETA: {eta_min:02d}:{eta_s:02d}"
+            )
+
+    if verbose and val_losses:
+        print("=" * 60)
+        print(f"Training complete. Final validation loss: {val_losses[-1]:.6f}")
+
+    history = {
+        "train_loss": losses,
+        "val_loss": val_losses,
+        "val_acc": val_accs,
+    }
+
+    return model, history
+
+
+def save_ik_network(model, filepath):
+    """Save the trained model to a file."""
+    torch.save(model.state_dict(), filepath)
+    print(f"Saved PyTorch IK network to {filepath}")
+
+
+def load_ik_network(filepath, hidden_size=256):
+    """Load a trained model from a file."""
+    model = IKNetwork3D(hidden_size=hidden_size)
+    model.load_state_dict(torch.load(filepath, weights_only=True))
+    model.eval()
+    print(f"Loaded PyTorch IK network from {filepath}")
+    return model
+
+
+def get_trained_ik_network(models_dir="saved_models", force_retrain=False):
+    """
+    Get a trained IK network, loading from file if available,
+    otherwise training a new one.
+    """
+    filepath = os.path.join(models_dir, "ik_network_3d_pytorch.pt")
+
+    if not force_retrain and os.path.exists(filepath):
+        return load_ik_network(filepath), {"train_loss": [], "val_loss": [], "val_acc": []}
+
+    # Train new network with physics-informed loss
+    model, history = train_ik_network(
+        num_samples=10000,
+        hidden_size=256,
+        epochs=150,
+        batch_size=64,
+        learning_rate=0.001,
+    )
+
+    # Save it
+    if not os.path.exists(models_dir):
+        os.makedirs(models_dir)
+    save_ik_network(model, filepath)
+
+    return model, history
+
+
+def evaluate_ik_network(model, num_tests=100):
+    """Evaluate the IK network on random reachable targets."""
+    import random
+
+    errors = []
+
+    for _ in range(num_tests):
+        # Generate a random reachable target (same ranges as training)
+        theta1 = random.uniform(-math.pi, math.pi)
+        theta2 = random.uniform(0.05, math.pi / 2)
+        theta3 = random.uniform(-math.pi / 2, 0)
+
+        x_target, y_target, z_target = forward_kinematics_3d(theta1, theta2, theta3)
+
+        # Normalize and predict
+        x_norm, y_norm, z_norm = normalize_position(x_target, y_target, z_target)
+        t1_pred, t2_pred, t3_pred = model.predict([x_norm, y_norm, z_norm])
+
+        # Denormalize predicted angles
+        theta1_pred, theta2_pred, theta3_pred = denormalize_angles(t1_pred, t2_pred, t3_pred)
+
+        # Compute predicted end-effector position
+        x_pred, y_pred, z_pred = forward_kinematics_3d(theta1_pred, theta2_pred, theta3_pred)
+
+        # 3D error
+        error = math.sqrt(
+            (x_target - x_pred) ** 2 +
+            (y_target - y_pred) ** 2 +
+            (z_target - z_pred) ** 2
+        )
+        errors.append(error)
+
+    avg_error = sum(errors) / len(errors)
+    max_error = max(errors)
+
+    return avg_error, max_error
+
+
+if __name__ == "__main__":
+    # Quick test
+    print("=" * 60)
+    print("Training PyTorch IK Network with Physics-Informed Loss...")
+    print("=" * 60)
+
+    model, losses = train_ik_network(
+        num_samples=10000,
+        hidden_size=256,
+        epochs=150,
+        batch_size=64,
+        learning_rate=0.001,
+    )
+
+    print("\n" + "=" * 60)
+    print("Evaluating on 200 random targets...")
+    print("=" * 60)
+
+    avg_err, max_err = evaluate_ik_network(model, num_tests=200)
+    print(f"Average 3D position error: {avg_err:.4f} cm")
+    print(f"Maximum 3D position error: {max_err:.4f} cm")
+
+    # Test a specific point
+    test_x, test_y, test_z = 3.0, 0.0, 1.0
+    norm_input = [test_x / MAX_REACH_3D, test_y / MAX_REACH_3D, test_z / MAX_REACH_3D]
+    
+    pred = model.predict(norm_input)
+    t1 = pred[0] * math.pi
+    t2 = pred[1] * math.pi
+    t3 = pred[2] * math.pi
+    
+    print(f"\nTest point: ({test_x}, {test_y}, {test_z})")
+    
+    # Verify using standard math
+    r = a1 * math.cos(t2) + a2 * math.cos(t2 + t3)
+    z = a1 * math.sin(t2) + a2 * math.sin(t2 + t3)
+    x_out = r * math.cos(t1)
+    y_out = r * math.sin(t1)
+    
+    print(f"NN result:  ({x_out:.4f}, {y_out:.4f}, {z:.4f})")
+    error = math.sqrt((test_x - x_out)**2 + (test_y - y_out)**2 + (test_z - z)**2)
+    print(f"Error:      {error:.4f} cm")
+
+    # Save
+    save_ik_network(model, "saved_models/ik_network_3d_pytorch.pt")

@@ -1,109 +1,63 @@
 import math
 import random
 
-# Link lengths (as specified in the project)
+# Arm lengths used by the 3D model
 a1 = 3.0  # 3 cm
 a2 = 2.0  # 2 cm
 
-def direct_kinematics(theta1, theta2):
-    """Forward kinematics: Convert joint angles to end-effector position"""
-    x = a1 * math.cos(theta1) + a2 * math.cos(theta1 + theta2)
-    y = a1 * math.sin(theta1) + a2 * math.sin(theta1 + theta2)
-    return x, y
+def forward_kinematics_3d(theta1, theta2, theta3):
+    # Planar (radius, height) in the shoulder-elbow plane
+    r = a1 * math.cos(theta2) + a2 * math.cos(theta2 + theta3)
+    z = a1 * math.sin(theta2) + a2 * math.sin(theta2 + theta3)
 
-def analytical_inverse_kinematics(x, y):
-    """Analytical inverse kinematics solution"""
-    # Calculate theta2 using cosine law
-    distance_squared = x*x + y*y
-    cos_theta2 = (distance_squared - a1*a1 - a2*a2) / (2 * a1 * a2)
+    # Rotate the planar radius around Z by theta1
+    x = r * math.cos(theta1)
+    y = r * math.sin(theta1)
 
-    # Check if position is reachable
-    if abs(cos_theta2) > 1:
-        return None, None  # Unreachable position
+    return x, y, z
 
-    # Two solutions for theta2 (elbow up/down)
-    theta2_1 = math.acos(cos_theta2)
-    theta2_2 = -math.acos(cos_theta2)
+# Normalization constants for 3D data
+MAX_REACH_3D = a1 + a2  # 5.0 cm - maximum reach of the arm
 
-    # Calculate corresponding theta1 values
-    # Using the formula from the project
-    theta1_1 = math.atan2(y, x) - math.atan2(a2 * math.sin(theta2_1), a1 + a2 * math.cos(theta2_1))
-    theta1_2 = math.atan2(y, x) - math.atan2(a2 * math.sin(theta2_2), a1 + a2 * math.cos(theta2_2))
+def normalize_position(x, y, z):
+    """Normalize (x, y, z) to range [-1, 1] based on max reach."""
+    return x / MAX_REACH_3D, y / MAX_REACH_3D, z / MAX_REACH_3D
 
-    # Return elbow-up solution (typically preferred)
-    return theta1_1, theta2_1
 
-def normalize_angle(angle):
-    """Normalize angle to [-pi, pi]"""
-    while angle > math.pi:
-        angle -= 2 * math.pi
-    while angle < -math.pi:
-        angle += 2 * math.pi
-    return angle
+def denormalize_position(x_norm, y_norm, z_norm):
+    """Convert normalized position back to real coordinates."""
+    return x_norm * MAX_REACH_3D, y_norm * MAX_REACH_3D, z_norm * MAX_REACH_3D
 
-def generate_circular_training_data(radius=3.5, num_samples=200):
-    """Generate training data on a circle (as specified in project)"""
-    training_data = []
 
-    for i in range(num_samples):
-        beta = (2 * math.pi * i) / num_samples  # Parametric angle
+def normalize_angles(theta1, theta2, theta3):
+    """Normalize angles to range [-1, 1] by dividing by pi."""
+    return theta1 / math.pi, theta2 / math.pi, theta3 / math.pi
 
-        # Circular path equations (corrected from project)
-        x = radius * math.cos(beta)
-        y = radius * math.sin(beta)  # Fixed: was r*cos(β) in project, should be r*sin(β)
 
-        # Get analytical solution
-        theta1, theta2 = analytical_inverse_kinematics(x, y)
+def denormalize_angles(t1_norm, t2_norm, t3_norm):
+    """Convert normalized angles back to radians."""
+    return t1_norm * math.pi, t2_norm * math.pi, t3_norm * math.pi
 
-        if theta1 is not None and theta2 is not None:
-            # Normalize angles
-            theta1_norm = normalize_angle(theta1)
-            theta2_norm = normalize_angle(theta2)
 
-            inputs = [x, y]
-            targets = [theta1_norm, theta2_norm]
-            training_data.append((inputs, targets))
-
-    return training_data
-
-def generate_quadrant_training_data(num_samples=500):
-    """Generate training data in first quadrant"""
+def generate_3d_workspace_data(num_samples=3000):
     training_data = []
 
     for _ in range(num_samples):
-        # Random point in first quadrant within workspace
-        angle = random.uniform(0, math.pi/2)
-        radius = random.uniform(abs(a1 - a2) + 0.1, a1 + a2 - 0.1)
+        # Sample joint angles - RESTRICTED to one configuration (no ambiguity)
+        theta1 = random.uniform(-math.pi, math.pi)       # full rotation around Z
+        theta2 = random.uniform(-math.pi / 4, math.pi / 2)  # shoulder: -45° to +90° (can reach down)
+        theta3 = random.uniform(-math.pi / 2, 0)         # elbow: -90° to 0° (bends inward)
 
-        x = radius * math.cos(angle)
-        y = radius * math.sin(angle)
+        x, y, z = forward_kinematics_3d(theta1, theta2, theta3)
 
-        theta1, theta2 = analytical_inverse_kinematics(x, y)
+        # Normalize inputs (positions) to [-1, 1]
+        x_norm, y_norm, z_norm = normalize_position(x, y, z)
 
-        if theta1 is not None and theta2 is not None:
-            inputs = [x, y]
-            targets = [normalize_angle(theta1), normalize_angle(theta2)]
-            training_data.append((inputs, targets))
+        # Normalize outputs (angles) to [-1, 1]
+        t1_norm, t2_norm, t3_norm = normalize_angles(theta1, theta2, theta3)
 
-    return training_data
-
-def generate_full_workspace_data(num_samples=2000):
-    """Generate training data for full workspace"""
-    training_data = []
-
-    for _ in range(num_samples):
-        # Random point in full workspace
-        angle = random.uniform(0, 2 * math.pi)
-        radius = random.uniform(abs(a1 - a2) + 0.1, a1 + a2 - 0.1)
-
-        x = radius * math.cos(angle)
-        y = radius * math.sin(angle)
-
-        theta1, theta2 = analytical_inverse_kinematics(x, y)
-
-        if theta1 is not None and theta2 is not None:
-            inputs = [x, y]
-            targets = [normalize_angle(theta1), normalize_angle(theta2)]
-            training_data.append((inputs, targets))
+        inputs = [x_norm, y_norm, z_norm]
+        targets = [t1_norm, t2_norm, t3_norm]
+        training_data.append((inputs, targets))
 
     return training_data
