@@ -103,9 +103,10 @@ class RobotArmVisualizer:
 
     def setup_arm_plot(self):
         # Set 3D axes limits (arm still lies in z = 0 plane)
-        self.ax.set_xlim(-6, 6)
-        self.ax.set_ylim(-6, 6)
-        self.ax.set_zlim(-6, 6)
+        lim = float(MAX_REACH_3D) + 1.0
+        self.ax.set_xlim(-lim, lim)
+        self.ax.set_ylim(-lim, lim)
+        self.ax.set_zlim(-lim, lim)
         self.ax.grid(True, alpha=0.3)
         self.ax.set_xlabel('X Position (cm)')
         self.ax.set_ylabel('Y Position (cm)')
@@ -144,7 +145,7 @@ class RobotArmVisualizer:
 
         # Draw workspace boundaries as circles in the XY plane (z = 0)
         theta = np.linspace(0, 2 * math.pi, 200)
-        outer_r = a1 + a2
+        outer_r = float(MAX_REACH_3D)
         inner_r = abs(a1 - a2)
 
         outer_x = outer_r * np.cos(theta)
@@ -164,17 +165,23 @@ class RobotArmVisualizer:
             color='gray', linestyle='--', alpha=0.5, linewidth=1
         )
 
-        # Show Z boundary as a single vertical ring (XZ plane at y=0)
-        z_min, z_max = -5.0, 5.0
-        ring_theta = np.linspace(0, 2 * math.pi, 200)
-        ring_x = outer_r * np.cos(ring_theta)
-        ring_z = np.linspace(z_min, z_max, 200)
-        # To form a vertical circle, parametrize half in +z and half in -z
-        ring_z = outer_r * np.sin(ring_theta)
-        ring_y = np.zeros_like(ring_theta)
-        self.z_ring_vertical, = self.ax.plot(
-            ring_x, ring_y, ring_z,
-            color='purple', linestyle='--', alpha=0.55, linewidth=1.4, label='Z Boundary'
+        # Show max reach as 3 orthogonal circles (XY, XZ, YZ) at r = MAX_REACH_3D
+        ring_theta = np.linspace(0, 2 * math.pi, 240)
+        # XY plane (z = 0) is already covered by workspace_outer_line; add XZ and YZ too.
+        ring_x_xz = outer_r * np.cos(ring_theta)
+        ring_y_xz = np.zeros_like(ring_theta)
+        ring_z_xz = outer_r * np.sin(ring_theta)
+        self.reach_ring_xz, = self.ax.plot(
+            ring_x_xz, ring_y_xz, ring_z_xz,
+            color='gray', linestyle='--', alpha=0.45, linewidth=1.6, label='Max Reach (XZ)'
+        )
+
+        ring_x_yz = np.zeros_like(ring_theta)
+        ring_y_yz = outer_r * np.cos(ring_theta)
+        ring_z_yz = outer_r * np.sin(ring_theta)
+        self.reach_ring_yz, = self.ax.plot(
+            ring_x_yz, ring_y_yz, ring_z_yz,
+            color='gray', linestyle='--', alpha=0.45, linewidth=1.6, label='Max Reach (YZ)'
         )
 
         # Initialize arm elements with enhanced styling (all in z = 0 plane)
@@ -194,9 +201,10 @@ class RobotArmVisualizer:
         self.legend = self.fig.legend(
             [self.link1_line, self.link2_line, self.joint1_point, self.joint2_point,
              self.end_effector_nn, self.end_effector_analytical, self.target_point,
-             self.workspace_outer_line],
+             self.workspace_outer_line, self.reach_ring_xz, self.reach_ring_yz],
             ['Link 1 (3cm)', 'Link 2 (2cm)', 'Base Joint', 'Elbow Joint',
-             'NN End Effector', 'Analytical Solution', 'Target Position', 'Workspace Boundary'],
+             'NN End Effector', 'Analytical Solution', 'Target Position',
+             'Max Reach (XY)', 'Max Reach (XZ)', 'Max Reach (YZ)'],
             loc='upper left',
             bbox_to_anchor=(0.012, 0.30, 0.216, 0.0),
             bbox_transform=self.fig.transFigure,
@@ -211,8 +219,8 @@ class RobotArmVisualizer:
         # Add information display text in the left column below the legend
         self.info_text = self.fig.text(
             0.012, 0.71, '', fontsize=10,
-            verticalalignment='top',
-            horizontalalignment='left',
+                                     verticalalignment='top',
+                                     horizontalalignment='left',
             bbox=dict(
                 boxstyle="round,pad=0.4",
                 facecolor="white",

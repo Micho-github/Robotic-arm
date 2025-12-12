@@ -24,3 +24,5 @@ def connect_mouse_events(visualizer):
     fig.canvas.mpl_connect('motion_notify_event', on_mouse_motion)
 
 
+
+

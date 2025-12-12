@@ -30,3 +30,5 @@ def apply_layout(fig):
     fig.text(0.76, 0.74, "Values", fontsize=11, fontweight='semibold', ha='left', color='#333')
 
 
+
+

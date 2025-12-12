@@ -87,11 +87,11 @@ class NetworkManager:
 
         # Load model
         if os.path.exists(filepath):
-            try:
-                networks['3d'] = load_ik_network(filepath, hidden_size=256)
-                print(f"  (Version {version:02d})")
-            except Exception as e:
-                print(f"✗ Failed to load model: {e}")
+                try:
+                    networks['3d'] = load_ik_network(filepath, hidden_size=256)
+                    print(f"  (Version {version:02d})")
+                except Exception as e:
+                    print(f"✗ Failed to load model: {e}")
         else:
             print(f"✗ Model file not found: {filepath}")
 

@@ -1,6 +1,7 @@
 from utils.network_manager import NetworkManager
 from visualization.robot_arm_visualizer import RobotArmVisualizer
 from models.neural_network import train_ik_network
+import sys
 
 # Global training configuration for IK network (used everywhere)
 IK_TRAIN_SAMPLES = 25000
@@ -52,6 +53,12 @@ def cli_interface():
 
 if __name__ == "__main__":
     try:
+        # Avoid Windows console encoding issues with banner/emoji output
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
         mode, network_manager = cli_interface()
 
         if mode == 'train':
@@ -83,7 +90,6 @@ if __name__ == "__main__":
             )
 
         elif mode == 'load':
-            print("\n📂 Loading existing networks...")
             networks, training_history = network_manager.load_networks()
 
             if not networks:
@@ -105,7 +111,7 @@ if __name__ == "__main__":
             visualizer = RobotArmVisualizer(
                 networks=networks,
                 training_history=training_history,
-                network_manager=network_manager
+                network_manager=network_manager,
             )
 
         print("\nRobot arm visualization is starting...")
