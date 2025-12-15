@@ -1,7 +1,22 @@
+import sys
+
 from utils.network_manager import NetworkManager
 from visualization.robot_arm_visualizer import RobotArmVisualizer
-from models.neural_network import train_ik_network
-import sys
+from visualization.conveyor_visualizer import main as conveyor_main
+
+from models.ik.neural_network import train_ik_network
+from models.vision.cnn_conveyor import (
+    get_trained_conveyor_classifier,
+    evaluate_conveyor_classifier,
+    evaluate_conveyor_classifier_robust,
+    DEFAULT_REAL_DATA_DIR,
+    is_real_dataset_available,
+    CLASSES as CONVEYOR_CLASSES,
+    load_existing_conveyor_classifier,
+    get_conveyor_model_path,
+    select_and_load_vision_model,
+)
+
 
 # Global training configuration for IK network (used everywhere)
 IK_TRAIN_SAMPLES = 25000
@@ -10,118 +25,121 @@ IK_EPOCHS = 34
 IK_BATCH_SIZE = 64
 IK_LEARNING_RATE = 0.001
 
-def cli_interface():
-    print("▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄")
-    print("██░▄▄▀█▀▄▄▀█░▄▄▀█▀▄▄▀█▄░▄██▄██▀▄▀███░▄▄▀██░▄▄▀██░▄▀▄░")
-    print("██░▀▀▄█░██░█░▄▄▀█░██░██░███░▄█░█▀███░▀▀░██░▀▀▄██░█░█░")
-    print("██░██░██▄▄██▄▄▄▄██▄▄███▄██▄▄▄██▄████░██░██░██░██░███░")
-    print("▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀")
 
-    manager = NetworkManager()
-    available_models = manager.list_saved_models()
+def _banner():
+    print("Robot Arm Control System")
+    print("Train and test IK (inverse kinematics) and vision models")
 
-    print("\nOptions:")
-    print("1. Train new neural networks (and save them)")
-    print("2. Load existing trained networks")
-    print("3. Exit")
 
+def _input_choice(prompt, valid):
+    valid = {str(v) for v in valid}
     while True:
-        try:
-            choice = input("\nEnter your choice (1-3): ").strip()
+        choice = input(prompt).strip()
+        if choice in valid:
+            return choice
+        print(f"Invalid choice. Expected one of: {', '.join(sorted(valid))}")
 
-            if choice == '1':
-                print("\n🎯 Starting new training session...")
-                return 'train', manager
 
-            elif choice == '2':
-                if not available_models:
-                    print("\n❌ No saved models available. Please train new networks first.")
-                    continue
-                print("\n📂 Loading existing networks...")
-                return 'load', manager
+def ik_menu(network_manager: NetworkManager):
+    while True:
+        network_manager.list_saved_models()
+        print("\nIK Menu:")
+        print("1. Load model & run robotic arm visualization")
+        print("2. Train new IK model")
+        print("3. Back to main menu")
+        choice = _input_choice("Select option (1-3): ", {"1", "2", "3"})
+        if choice == "3":
+            return
 
-            elif choice == '3':
-                print("\n👋 Goodbye!")
-                exit()
-
-            else:
-                print("❌ Invalid choice. Please enter 1, 2, or 3.")
-
-        except KeyboardInterrupt:
-            print("\n\n👋 Goodbye!")
-            exit()
-
-if __name__ == "__main__":
-    try:
-        # Avoid Windows console encoding issues with banner/emoji output
-        try:
-            sys.stdout.reconfigure(encoding="utf-8")
-        except Exception:
-            pass
-
-        mode, network_manager = cli_interface()
-
-        if mode == 'train':
-            print("\n🚀 Starting training session...")
-            print("This will take a few minutes. Please wait...")
-
-            # Train IK network from main (not inside the visualizer)
+        if choice == "2":
+            print()
             model, history = train_ik_network(
                 num_samples=IK_TRAIN_SAMPLES,
-                hidden_size=IK_HIDDEN_SIZE,  # match visualizer expectations
+                hidden_size=IK_HIDDEN_SIZE,
                 epochs=IK_EPOCHS,
                 batch_size=IK_BATCH_SIZE,
                 learning_rate=IK_LEARNING_RATE,
                 verbose=True,
             )
-
-            # Wrap training history in the expected dict format
-            training_history = {'3d': history}
-
-            # Save via NetworkManager with versioning
+            training_history = {"3d": history}
             network_manager.save_network(model, training_history)
+            networks = {"3d": model}
+        else:
+            selected_version = network_manager.select_and_load_model("Select IK model to load")
+            if selected_version is None:
+                continue  # User cancelled, stay in menu
 
-            # Pass the trained network into the visualizer
-            networks = {'3d': model}
-            visualizer = RobotArmVisualizer(
-                networks=networks,
-                training_history=training_history,
-                network_manager=network_manager,
-            )
-
-        elif mode == 'load':
-            networks, training_history = network_manager.load_networks()
-
+            networks, training_history = network_manager.load_networks(version=selected_version)
             if not networks:
-                print("\n❌ No networks found! Starting training instead...")
+                print("Failed to load selected model.")
+                continue
 
-                model, history = train_ik_network(
-                    num_samples=IK_TRAIN_SAMPLES,
-                    hidden_size=IK_HIDDEN_SIZE,
-                    epochs=IK_EPOCHS,
-                    batch_size=IK_BATCH_SIZE,
-                    learning_rate=IK_LEARNING_RATE,
-                    verbose=True,
-                )
-                training_history = {'3d': history}
-                network_manager.save_network(model, training_history)
-                networks = {'3d': model}
-
-            print(f"✅ Successfully loaded {len(networks)} network(s)")
-            visualizer = RobotArmVisualizer(
-                networks=networks,
-                training_history=training_history,
-                network_manager=network_manager,
-            )
-
-        print("\nRobot arm visualization is starting...")
-
+        print("\nLaunching Robot Arm Visualizer...")
+        visualizer = RobotArmVisualizer(
+            networks=networks,
+            training_history=training_history,
+            network_manager=network_manager,
+        )
         visualizer.show()
+        return
 
+
+def vision_menu():
+    while True:
+        print("\nVision Menu:")
+        print("1. Load model & run conveyor demo")
+        print("2. Train new conveyor classifier")
+        print("3. Back to main menu")
+
+        choice = _input_choice("Select option (1-3): ", {"1", "2", "3"})
+        if choice == "3":
+            return
+
+        if choice == "2":
+            print()
+            model, _ = get_trained_conveyor_classifier(force_retrain=True)
+            evaluate_conveyor_classifier(model)
+            return
+
+        if choice == "1":
+            model, filepath = select_and_load_vision_model()
+            if model is None:
+                continue  # User cancelled, stay in menu
+            print()
+            conveyor_main()
+            return
+
+
+def main():
+    # Avoid Windows console encoding issues with banner/emoji output
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+    _banner()
+    network_manager = NetworkManager()
+
+    while True:
+        print("\nMain Menu:")
+        print("1. IK Models - Train/test robot arm inverse kinematics")
+        print("2. Vision Models - Train/test conveyor object classification")
+        print("3. Exit")
+        choice = _input_choice("Select option (1-3): ", {"1", "2", "3"})
+        if choice == "1":
+            ik_menu(network_manager)
+        elif choice == "2":
+            vision_menu()
+        else:
+            print("\nGoodbye!")
+            return
+
+
+if __name__ == "__main__":
+    try:
+        main()
     except KeyboardInterrupt:
-        print("\n\nProgram interrupted by user. Goodbye!")
+        print("\n\nProgram interrupted. Goodbye!")
     except Exception as e:
         print(f"\nAn error occurred: {e}")
         print("Please check your Python environment and try again.")
-    finally:
-        print("\nThank you for using the Robot Arm Neural Network!")

@@ -10,7 +10,7 @@ from utils.kinematics import (
     denormalize_angles,
     MAX_REACH_3D,
 )
-from models.cnn_pick_place import get_trained_pick_place_cnn, generate_sample_and_predict
+from models.vision.cnn_pick_place import get_trained_pick_place_cnn, generate_sample_and_predict
 from visualization.components.targets import (
     update_target_value,
     submit_target_value,
@@ -118,6 +118,15 @@ class RobotArmVisualizer:
         except Exception:
             # Older matplotlib versions may not support set_box_aspect
             pass
+
+        # Capture the default 3D camera view so the "Reset View" button works reliably.
+        # (If these aren't set, reset_view() will fail silently and appear broken.)
+        try:
+            self.default_elev = float(getattr(self.ax, "elev", 30.0))
+            self.default_azim = float(getattr(self.ax, "azim", -60.0))
+        except Exception:
+            self.default_elev = 30.0
+            self.default_azim = -60.0
 
         # Reconfigure default 3D mouse controls so LEFT button is free for our own handler.
         # - Right drag: rotate 3D view
@@ -234,7 +243,9 @@ class RobotArmVisualizer:
     def reset_view(self, event):
         """Reset the 3D view to the default elevation/azimuth."""
         try:
-            self.ax.view_init(elev=self.default_elev, azim=self.default_azim)
+            elev = getattr(self, "default_elev", 30.0)
+            azim = getattr(self, "default_azim", -60.0)
+            self.ax.view_init(elev=elev, azim=azim)
             self.fig.canvas.draw_idle()
         except Exception:
             pass

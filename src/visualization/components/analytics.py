@@ -3,7 +3,7 @@ import random
 import matplotlib.pyplot as plt
 
 from utils.kinematics import forward_kinematics_3d, generate_3d_workspace_data
-from models.cnn_pick_place import get_trained_pick_place_cnn, generate_sample_and_predict
+from models.vision.cnn_pick_place import get_trained_pick_place_cnn, generate_sample_and_predict
 
 
 def show_loss_plots(visualizer, event):
