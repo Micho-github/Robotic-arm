@@ -222,8 +222,3 @@ def generate_sample_and_predict(model, image_size: int = 64):
         pred_x, pred_y = float(output[0]), float(output[1])
 
     return img_np, true_x, true_y, pred_x, pred_y
-
-
-
-
-
