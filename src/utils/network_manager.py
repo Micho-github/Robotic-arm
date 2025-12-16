@@ -63,11 +63,11 @@ class NetworkManager:
             print(f"🗑️  Removed oldest model (v{oldest_version:02d}) to maintain max 3 models")
 
         filepath, version = self.get_next_version_filename()
-
+        
         # Save the model
         save_ik_network(model, filepath)
         print(f"✓ Saved as version {version:02d}")
-
+        
         # Save training history with version
         history_file = os.path.join(self.models_dir, f"training_history_v{version:02d}.pkl")
         with open(history_file, 'wb') as f:

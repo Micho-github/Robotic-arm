@@ -3,7 +3,6 @@ import random
 import matplotlib.pyplot as plt
 
 from utils.kinematics import forward_kinematics_3d, generate_3d_workspace_data
-from models.vision.cnn_pick_place import get_trained_pick_place_cnn, generate_sample_and_predict
 
 
 def show_loss_plots(visualizer, event):
@@ -131,28 +130,5 @@ def show_training_data(event):
         pass
 
     plt.tight_layout()
-    plt.show()
-
-
-def run_cnn_pick_and_place(visualizer, event):
-    if visualizer.pick_place_cnn is None:
-        visualizer.pick_place_cnn = get_trained_pick_place_cnn()
-
-    image_np, true_x, true_y, pred_x, pred_y = generate_sample_and_predict(visualizer.pick_place_cnn)
-
-    visualizer.target_x = pred_x
-    visualizer.target_y = pred_y
-    visualizer.target_z = 1.0
-
-    visualizer.slider_x.set_val(visualizer.target_x)
-    visualizer.slider_y.set_val(visualizer.target_y)
-    visualizer.slider_z.set_val(visualizer.target_z)
-
-    visualizer.update_visualization()
-
-    fig, ax = plt.subplots(figsize=(4, 4))
-    ax.imshow(image_np, cmap='gray', origin='lower')
-    ax.set_title('CNN Pick & Place Input Image')
-    ax.set_axis_off()
     plt.show()
 

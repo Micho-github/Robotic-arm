@@ -12,7 +12,6 @@ def build_controls(fig, callbacks, initial_values):
       - show_loss_plots
       - show_error_comparison
       - show_training_data
-      - run_cnn_pick_and_place
       - reset_view
 
     initial_values: dict with keys 'x', 'y', 'z'
@@ -35,13 +34,7 @@ def build_controls(fig, callbacks, initial_values):
     btn_random = Button(ax_random, "Random Target")
     btn_random.on_clicked(callbacks["generate_random_target"])
 
-    ax_cnn = plt.axes([col1_x, row2_y, col1_w, btn_h])
-    ax_cnn.set_zorder(3)
-    ax_cnn.set_facecolor("white")
-    btn_cnn = Button(ax_cnn, "CNN Pick & Place")
-    btn_cnn.on_clicked(callbacks["run_cnn_pick_and_place"])
-
-    ax_workspace = plt.axes([col2_x, row2_y, col2_w, btn_h])
+    ax_workspace = plt.axes([col1_x, row2_y, col1_w, btn_h])
     ax_workspace.set_zorder(3)
     ax_workspace.set_facecolor("white")
     btn_workspace = Button(ax_workspace, "Training Data")
@@ -117,10 +110,10 @@ def build_controls(fig, callbacks, initial_values):
     slider_z.on_changed(callbacks["update_target_z"])
 
     action_axes = [
-        ax_random, ax_loss, ax_comparison, ax_workspace, ax_cnn, ax_reset_view
+        ax_random, ax_loss, ax_comparison, ax_workspace, ax_reset_view
     ]
     action_buttons = [
-        btn_random, btn_loss, btn_comparison, btn_workspace, btn_cnn, btn_reset_view
+        btn_random, btn_loss, btn_comparison, btn_workspace, btn_reset_view
     ]
 
     return {

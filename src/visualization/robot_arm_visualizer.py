@@ -10,7 +10,6 @@ from utils.kinematics import (
     denormalize_angles,
     MAX_REACH_3D,
 )
-from models.vision.cnn_pick_place import get_trained_pick_place_cnn, generate_sample_and_predict
 from visualization.components.targets import (
     update_target_value,
     submit_target_value,
@@ -20,7 +19,6 @@ from visualization.components.analytics import (
     show_loss_plots as comp_show_loss_plots,
     show_error_comparison as comp_show_error_comparison,
     show_training_data as comp_show_training_data,
-    run_cnn_pick_and_place as comp_run_cnn_pick_and_place,
 )
 
 # Link lengths (as specified in the project)
@@ -37,7 +35,6 @@ class RobotArmVisualizer:
         }
         self.network_manager = network_manager
         self.current_nn = None
-        self.pick_place_cnn = None  # CNN for vision-based pick-and-place
         self.target_x = 3.0
         self.target_y = 2.0
         self.target_z = 0.0
@@ -306,7 +303,6 @@ class RobotArmVisualizer:
                 "show_loss_plots": self.show_loss_plots,
                 "show_error_comparison": self.show_error_comparison,
                 "show_training_data": self.show_training_data,
-                "run_cnn_pick_and_place": self.run_cnn_pick_and_place,
                 "reset_view": self.reset_view,
             },
             initial_values={
@@ -486,13 +482,6 @@ class RobotArmVisualizer:
     def show_training_data(self, event):
         """Show 3D training data visualization in a new window"""
         comp_show_training_data(event)
-
-    def run_cnn_pick_and_place(self, event):
-        """
-        Use the CNN to detect a block in a synthetic image and move the arm
-        to the predicted (x, y) position (with a fixed Z height).
-        """
-        comp_run_cnn_pick_and_place(self, event)
 
     def show(self):
         """Display the main robot arm visualization"""

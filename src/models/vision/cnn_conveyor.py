@@ -426,21 +426,21 @@ class ConveyorClassifier(nn.Module):
                 image = torch.tensor(image, dtype=torch.float32)
             elif isinstance(image, Image.Image):
                 image = transforms.ToTensor()(image).to(torch.float32)
-
+            
             if image.dim() == 3:
                 image = image.unsqueeze(0)
-
+            
             # Resize
             if image.shape[-1] != 224:
                 image = torch.nn.functional.interpolate(image, size=(224, 224), mode='bilinear', align_corners=False)
-
+            
             # Normalize and move to correct device
             image = _imagenet_normalize_batch(image).to(device)
-
+            
             output = self.forward(image)
             probs = torch.softmax(output, dim=1)
             confidence, class_idx = torch.max(probs, dim=1)
-
+            
             # Move results back to CPU for Python
             return class_idx.cpu().item(), CLASSES[class_idx.cpu().item()], confidence.cpu().item()
 
@@ -456,7 +456,7 @@ def train_conveyor_classifier(
 ):
     """
     Train the conveyor classifier on real images (if available), otherwise synthetic.
-
+    
     Returns:
         model: trained ConveyorClassifier
         losses: list of loss per epoch
@@ -493,14 +493,14 @@ def train_conveyor_classifier(
         dataset = TensorDataset(images_normalized, labels)
         train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
         val_loader = None
-
+    
     # Create model
     if verbose:
         print("Loading pre-trained MobileNetV2 and fine-tuning...")
         print()
     model = ConveyorClassifier(pretrained=True)
     model = model.to(device)
-
+    
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=learning_rate)
     
@@ -531,7 +531,7 @@ def train_conveyor_classifier(
             epoch_loss = 0.0
             correct = 0
             total = 0
-
+            
             # --- PROGRESS BAR: Wrapper for Progress Bar ---
             # desc: The text to show before the bar (e.g., "Epoch 1/50")
             # leave=False: Removes the bar after the epoch finishes so your console stays clean
@@ -544,41 +544,39 @@ def train_conveyor_classifier(
                 batch_images = batch_images.to(device)
                 batch_labels = batch_labels.to(device)
 
-                optimizer.zero_grad()
-                outputs = model(batch_images)
-                loss = criterion(outputs, batch_labels)
-                loss.backward()
-                optimizer.step()
-
-                epoch_loss += loss.item()
-                _, predicted = torch.max(outputs, 1)
-                total += batch_labels.size(0)
-                correct += (predicted == batch_labels).sum().item()
-
-                # Update the progress bar text with current stats
-                current_acc = 100 * correct / total
-                loop.set_postfix(loss=f"{loss.item():.4f}", acc=f"{current_acc:.1f}%")
-            # --- END PROGRESS BAR ---
-
-            avg_loss = epoch_loss / max(1, len(train_loader))
-            accuracy = 100 * correct / max(1, total)
-            losses.append(avg_loss)
+            optimizer.zero_grad()
+            outputs = model(batch_images)
+            loss = criterion(outputs, batch_labels)
+            loss.backward()
+            optimizer.step()
+            
+            epoch_loss += loss.item()
+            _, predicted = torch.max(outputs, 1)
+            total += batch_labels.size(0)
+            correct += (predicted == batch_labels).sum().item()
         
-            val_acc = None
-            if val_loader is not None:
-                model.eval()
-                v_correct = 0
-                v_total = 0
-                with torch.no_grad():
-                    for v_images, v_labels in val_loader:
-                        v_images = v_images.to(device)
-                        v_labels = v_labels.to(device)
+            current_acc = 100 * correct / total
+            loop.set_postfix(loss=f"{loss.item():.4f}", acc=f"{current_acc:.1f}%")
 
-                        v_out = model(v_images)
-                        _, v_pred = torch.max(v_out, 1)
-                        v_total += v_labels.size(0)
-                        v_correct += (v_pred == v_labels).sum().item()
-                val_acc = 100 * v_correct / max(1, v_total)
+        avg_loss = epoch_loss / max(1, len(train_loader))
+        accuracy = 100 * correct / max(1, total)
+        losses.append(avg_loss)
+        
+        val_acc = None
+        if val_loader is not None:
+            model.eval()
+            v_correct = 0
+            v_total = 0
+            with torch.no_grad():
+                for v_images, v_labels in val_loader:
+                    v_images = v_images.to(device)
+                    v_labels = v_labels.to(device)
+
+                    v_out = model(v_images)
+                    _, v_pred = torch.max(v_out, 1)
+                    v_total += v_labels.size(0)
+                    v_correct += (v_pred == v_labels).sum().item()
+            val_acc = 100 * v_correct / max(1, v_total)
 
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
@@ -608,17 +606,6 @@ def train_conveyor_classifier(
         else:
             print("Not saved.")
         raise
-    
-    if verbose:
-        print("-" * 60)
-        if best_val_acc >= 0:
-            print(f"Training complete. Best Val accuracy: {best_val_acc:.1f}%")
-        else:
-            print(f"Training complete. Final Train accuracy: {accuracy:.1f}%")
-
-    if best_state is not None:
-        model.load_state_dict(best_state)
-    
     return model, losses
 
 
@@ -922,7 +909,7 @@ def get_trained_conveyor_classifier(models_dir=os.path.join("saved_models", "con
     # Get next version filename for saving
     real_data_dir = DEFAULT_REAL_DATA_DIR
     filepath, next_version = _get_next_vision_version_filename(models_dir)
-
+    
     # Train new model
     model, losses = train_conveyor_classifier(
         num_samples_per_class=500,
@@ -932,12 +919,12 @@ def get_trained_conveyor_classifier(models_dir=os.path.join("saved_models", "con
         data_dir=real_data_dir,
         prefer_real_images=True,
     )
-
+    
     # Save it
     if not os.path.exists(models_dir):
         os.makedirs(models_dir)
     save_conveyor_classifier(model, filepath)
-
+    
     return model, losses
 
 
