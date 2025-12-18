@@ -13,6 +13,11 @@ from torchvision import models, transforms
 from torchvision.datasets import ImageFolder
 from PIL import Image
 
+try:
+    tqdm.monitor_interval = 0
+except Exception:
+    pass
+
 CLASSES = ['apple', 'banana', 'blackberrie', 'cucumber', 'onion', 'potato', 'tomato', 'trash']
 NUM_CLASSES = len(CLASSES)
 
@@ -41,7 +46,13 @@ CLASS_COLORS = {
     'trash':      (0.4, 0.4, 0.4),     # Gray
 }
 
-from models.vision.utils.helpers import dataset_path
+from models.vision.utils.helpers import (
+    dataset_path,
+    save_conveyor_classifier,
+    get_conveyor_model_path,
+    _rotate_vision_models,
+    _get_next_vision_version_filename,
+)
 
 DATASET_PATH = dataset_path()
 
@@ -210,25 +221,24 @@ def train_conveyor_classifier(
             correct = 0
             total = 0
 
-            loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False)
+            with tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False) as loop:
+                for batch_images, batch_labels in loop:
+                    batch_images = batch_images.to(device)
+                    batch_labels = batch_labels.to(device)
 
-            for batch_images, batch_labels in loop:
-                batch_images = batch_images.to(device)
-                batch_labels = batch_labels.to(device)
+                    optimizer.zero_grad()
+                    outputs = model(batch_images)
+                    loss = criterion(outputs, batch_labels)
+                    loss.backward()
+                    optimizer.step()
 
-                optimizer.zero_grad()
-                outputs = model(batch_images)
-                loss = criterion(outputs, batch_labels)
-                loss.backward()
-                optimizer.step()
+                    epoch_loss += loss.item()
+                    _, predicted = torch.max(outputs, 1)
+                    total += batch_labels.size(0)
+                    correct += (predicted == batch_labels).sum().item()
 
-                epoch_loss += loss.item()
-                _, predicted = torch.max(outputs, 1)
-                total += batch_labels.size(0)
-                correct += (predicted == batch_labels).sum().item()
-
-                current_acc = 100 * correct / total
-                loop.set_postfix(loss=f"{loss.item():.4f}", acc=f"{current_acc:.1f}%")
+                    current_acc = 100 * correct / total
+                    loop.set_postfix(loss=f"{loss.item():.4f}", acc=f"{current_acc:.1f}%")
 
             avg_loss = epoch_loss / max(1, len(train_loader))
             accuracy = 100 * correct / max(1, total)
@@ -274,9 +284,11 @@ def train_conveyor_classifier(
             print("Saved.")
         else:
             print("Not saved.")
-        raise
+            # Even if we don't save, restore best weights in memory for evaluation below.
+            if best_state is not None:
+                model.load_state_dict(best_state)
+        return model, losses
     return model, losses
-
 
 def evaluate_conveyor_classifier(model, data_dir=DATASET_PATH, batch_size=32, num_workers=0):
     _, val_loader = get_dataloaders(
@@ -293,7 +305,7 @@ def evaluate_conveyor_classifier(model, data_dir=DATASET_PATH, batch_size=32, nu
     conf = torch.zeros((num_classes, num_classes), dtype=torch.int64)
     model.eval()
 
-    print(f"Evaluating on {device}...")
+    print(f"Evaluating network")
 
     with torch.no_grad():
         for images, labels in val_loader:
@@ -317,230 +329,3 @@ def evaluate_conveyor_classifier(model, data_dir=DATASET_PATH, batch_size=32, nu
     print("\nConfusion matrix (rows=true, cols=pred):")
     print(conf)
     return conf
-
-
-def save_conveyor_classifier(model, filepath):
-    if isinstance(model, torch.nn.DataParallel):
-        state_dict = model.module.state_dict()
-    else:
-        state_dict = model.state_dict()
-
-    cpu_state_dict = {k: v.detach().cpu() for k, v in state_dict.items()}
-    torch.save(cpu_state_dict, filepath)
-
-
-def load_conveyor_classifier(filepath):
-    # Determine the device again
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    model = ConveyorClassifier(pretrained=False)
-    # Map location ensures we can load a GPU model onto a CPU only machine if needed
-    model.load_state_dict(torch.load(filepath, map_location=device, weights_only=True))
-    model = model.to(device)
-    model.eval()
-    print(f"Loaded conveyor classifier from {filepath} to {device}")
-    return model
-
-
-def get_conveyor_model_path(models_dir=os.path.join("saved_models", "conveyor")):
-    """Get path to the latest conveyor classifier model file."""
-    os.makedirs(models_dir, exist_ok=True)
-
-    # Return latest version
-    latest_path, version = _get_latest_vision_filename(models_dir)
-    if latest_path and os.path.exists(latest_path):
-        return latest_path
-
-    # No versions found, return path for first version
-    return _get_next_vision_version_filename(models_dir)[0]
-
-
-def list_available_vision_models(models_dir=os.path.join("saved_models", "conveyor")):
-    """List all available vision model files with their modification dates."""
-    from pathlib import Path
-    models_dir = Path(models_dir)
-    if not models_dir.exists():
-        return []
-
-    model_files = []
-    for pattern in ["conveyor_classifier*.pt"]:
-        for file_path in models_dir.glob(pattern):
-            if file_path.is_file():
-                stat = os.stat(file_path)
-                mod_time = stat.st_mtime
-                size_kb = stat.st_size / 1024
-                model_files.append((file_path, mod_time, size_kb))
-
-    # Sort by modification time (newest first)
-    model_files.sort(key=lambda x: x[1], reverse=True)
-    return model_files
-
-def select_and_load_vision_model(models_dir=os.path.join("saved_models", "conveyor"), prompt="Select vision model to load"):
-    """Display available vision models, let user choose, return (model, filepath)."""
-    versions_with_info = []
-    versions = _get_vision_versions(models_dir)
-
-    for version_num, filepath in versions:
-        stat = os.stat(filepath)
-        mod_time = stat.st_mtime
-        size_kb = stat.st_size / 1024
-        versions_with_info.append((version_num, filepath, mod_time, size_kb))
-
-    # Sort by version (oldest first, so V01 appears first)
-    versions_with_info.sort(key=lambda x: x[0])
-
-    print(f"\n{prompt}:")
-    print("-" * 80)
-    if not versions_with_info:
-        print("No saved models found.")
-        return None, None
-
-    for i, (version_num, filepath, mod_time, size_kb) in enumerate(versions_with_info, 1):
-        date_str = datetime.fromtimestamp(mod_time).strftime("%Y-%m-%d %H:%M:%S")
-        latest_tag = " (latest)" if i == 1 else ""
-        print(f"{i}. V{version_num:02d}{latest_tag} | {date_str} | {size_kb:.1f} KB")
-    print("0. Cancel")
-
-    while True:
-        try:
-            choice = input(f"\nSelect model (0-{len(versions_with_info)}): ").strip()
-            if choice == "0":
-                return None, None
-            idx = int(choice) - 1
-            if 0 <= idx < len(versions_with_info):
-                selected_filepath = versions_with_info[idx][1]
-                return load_conveyor_classifier(selected_filepath), selected_filepath
-            else:
-                print("Invalid selection.")
-        except ValueError:
-            print("Invalid input. Please enter a number.")
-
-def load_existing_conveyor_classifier(models_dir=os.path.join("saved_models", "conveyor")):
-    """
-    Load the latest existing classifier from disk.
-    Unlike `get_trained_conveyor_classifier`, this will NOT train if missing.
-    Returns: (model, filepath)
-    """
-    # Load latest version
-    latest_path, version = _get_latest_vision_filename(models_dir)
-    if latest_path and os.path.exists(latest_path):
-        return load_conveyor_classifier(latest_path), latest_path
-
-    raise FileNotFoundError(
-        f"No saved conveyor classifier found in '{models_dir}'. Train it first."
-    )
-
-
-def _get_vision_versions(models_dir=os.path.join("saved_models", "conveyor")):
-    """Return all saved vision model versions as [(version_number, filepath), ...]."""
-    versions = []
-    pattern = re.compile(r"vision_classifier_v(\d+)\.pt$")
-
-    if not os.path.exists(models_dir):
-        return versions
-
-    for filename in os.listdir(models_dir):
-        match = pattern.match(filename)
-        if match:
-            version_num = int(match.group(1))
-            filepath = os.path.join(models_dir, filename)
-            versions.append((version_num, filepath))
-
-    # Sort by version number
-    versions.sort(key=lambda x: x[0])
-    return versions
-
-def _get_next_vision_version_filename(models_dir=os.path.join("saved_models", "conveyor")):
-    """Filename for the next vision model version (latest + 1)."""
-    versions = _get_vision_versions(models_dir)
-
-    if versions:
-        next_version = versions[-1][0] + 1
-    else:
-        next_version = 1
-
-    filename = f"vision_classifier_v{next_version:02d}.pt"
-    return os.path.join(models_dir, filename), next_version
-
-def _get_latest_vision_filename(models_dir=os.path.join("saved_models", "conveyor")):
-    """Filename of the latest (highest version) vision model, or (None, None)."""
-    versions = _get_vision_versions(models_dir)
-
-    if versions:
-        return versions[-1][1], versions[-1][0]
-    return None, None
-
-def _rotate_vision_models(models_dir=os.path.join("saved_models", "conveyor"), keep_max=3):
-    """Rotate vision models to keep only the most recent 'keep_max' models."""
-    versions = _get_vision_versions(models_dir)
-
-    # Remove oldest versions if we have more than keep_max
-    while len(versions) > keep_max:
-        oldest_version, oldest_filepath = versions.pop(0)
-        if os.path.exists(oldest_filepath):
-            os.remove(oldest_filepath)
-        # Also remove corresponding history file if it exists
-        history_file = oldest_filepath.replace('.pt', '.pkl')
-        if os.path.exists(history_file):
-            os.remove(history_file)
-        print(f"🗑️  Removed oldest vision model: v{oldest_version:02d}")
-
-def get_trained_conveyor_classifier(models_dir=os.path.join("saved_models", "conveyor"), force_retrain=False):
-    """
-    Get a trained conveyor classifier, loading from file if available.
-    """
-    # If not forcing retrain, try to load latest version
-    if not force_retrain:
-        latest_path, version = _get_latest_vision_filename(models_dir)
-        if latest_path and os.path.exists(latest_path):
-            return load_conveyor_classifier(latest_path), []
-
-    # Rotate models before training new one
-    _rotate_vision_models(models_dir=models_dir, keep_max=3)
-
-    # Get next version filename for saving
-    real_data_dir = DATASET_PATH
-    filepath, next_version = _get_next_vision_version_filename(models_dir)
-    
-    # Train new model
-    model, losses = train_conveyor_classifier(
-        epochs=50,
-        batch_size=32,
-        learning_rate=0.001,
-        data_dir=real_data_dir,
-    )
-    
-    # Save it
-    if not os.path.exists(models_dir):
-        os.makedirs(models_dir)
-    save_conveyor_classifier(model, filepath)
-    
-    return model, losses
-
-
-if __name__ == "__main__":
-    # Quick test
-    print("=" * 50)
-    print("Testing Conveyor Classifier")
-    print("=" * 50)
-
-    # Train
-    model, losses = train_conveyor_classifier(
-        epochs=20,
-        verbose=True,
-    )
-
-    # Test on a sample image from each validation folder (real dataset)
-    print("\nTesting on validation samples:")
-    val_root = os.path.join(DATASET_PATH, "val")
-    for class_name in CLASSES:
-        cls_dir = os.path.join(val_root, class_name)
-        files = [f for f in os.listdir(cls_dir) if os.path.splitext(f)[1].lower() in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}]
-        if not files:
-            print(f"  (skip) No images found in {cls_dir}")
-            continue
-        img_path = os.path.join(cls_dir, random.choice(files))
-        img = Image.open(img_path).convert("RGB")
-        _, pred_name, conf = model.predict(img)
-        status = "✓" if pred_name == class_name else "✗"
-        print(f"  {status} True: {class_name:12s} → Predicted: {pred_name:12s} ({conf*100:.1f}%)  [{os.path.basename(img_path)}]")

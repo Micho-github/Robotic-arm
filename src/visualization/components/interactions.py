@@ -22,13 +22,3 @@ def connect_mouse_events(visualizer):
     fig.canvas.mpl_connect('button_press_event', on_mouse_press)
     fig.canvas.mpl_connect('button_release_event', on_mouse_release)
     fig.canvas.mpl_connect('motion_notify_event', on_mouse_motion)
-
-
-
-
-
-
-
-
-
-

@@ -304,9 +304,9 @@ if __name__ == "__main__":
     print(f"Maximum 3D position error: {max_err:.4f} cm")
 
     # Test a specific point
-    test_x, test_y, test_z = 3.0, 0.0, 1.0
+    test_x, test_y, test_z = 3.0,0.0, 1.0
     norm_input = [test_x / MAX_REACH_3D, test_y / MAX_REACH_3D, test_z / MAX_REACH_3D]
-    
+     
     pred = model.predict(norm_input)
     t1 = pred[0] * math.pi
     t2 = pred[1] * math.pi

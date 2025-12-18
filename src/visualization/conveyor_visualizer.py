@@ -24,10 +24,9 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from models.vision.cnn_conveyor import (
-    get_trained_conveyor_classifier,
     CLASSES, CLASS_COLORS, BOX_POSITIONS, DATASET_PATH
 )
-from models.vision.utils.helpers import check_dataset
+from models.vision.utils.helpers import get_trained_conveyor_classifier, check_dataset
 from utils.network_manager import NetworkManager
 from utils.kinematics import forward_kinematics_3d, normalize_position, denormalize_angles
 from PIL import Image
@@ -168,13 +167,19 @@ class ConveyorObject:
 
 
 class ConveyorSorterVisualizer:
-    def __init__(self):
+    def __init__(self, classifier=None, classifier_path=None):
         try:
             sys.stdout.reconfigure(encoding="utf-8")
         except: pass
 
         print("Loading models...")
-        self.classifier, _ = get_trained_conveyor_classifier()
+        if classifier is not None:
+            self.classifier = classifier
+        elif classifier_path is not None:
+            from models.vision.utils.helpers import load_conveyor_classifier
+            self.classifier = load_conveyor_classifier(classifier_path)
+        else:
+            self.classifier, _ = get_trained_conveyor_classifier()
         
         try:
             nm = NetworkManager()
@@ -668,7 +673,7 @@ class ConveyorSorterVisualizer:
         plt.show()
 
 
-def main():
+def main(classifier_model=None, classifier_path=None):
     """Run the conveyor sorter visualization."""
     print("=" * 60)
     print("Conveyor Belt Sorting Simulation")
@@ -684,7 +689,10 @@ def main():
     print("  - Click class buttons to add objects manually")
     print()
     
-    visualizer = ConveyorSorterVisualizer()
+    visualizer = ConveyorSorterVisualizer(
+        classifier=classifier_model,
+        classifier_path=classifier_path,
+    )
     visualizer.show()
 
 

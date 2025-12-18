@@ -6,15 +6,17 @@ from visualization.conveyor_visualizer import main as conveyor_main
 
 from models.ik.neural_network import train_ik_network
 from models.vision.cnn_conveyor import (
-    get_trained_conveyor_classifier,
     evaluate_conveyor_classifier,
     DATASET_PATH,
     CLASSES as CONVEYOR_CLASSES,
+)
+from models.vision.utils.helpers import (
+    check_dataset,
+    get_trained_conveyor_classifier,
     load_existing_conveyor_classifier,
     get_conveyor_model_path,
     select_and_load_vision_model,
 )
-from models.vision.utils.helpers import check_dataset
 
 
 # Global training configuration for IK network (used everywhere)
@@ -27,7 +29,7 @@ IK_LEARNING_RATE = 0.001
 
 def _banner():
     print("Robot Arm Control System")
-    print("Train and test IK (inverse kinematics) and vision models")
+    print("Train and test robot arm and conveyor models")
 
 
 def _input_choice(prompt, valid):
@@ -42,9 +44,9 @@ def _input_choice(prompt, valid):
 def ik_menu(network_manager: NetworkManager):
     while True:
         network_manager.list_saved_models()
-        print("\nIK Menu:")
+        print("\nRobot Arm Models Menu:")
         print("1. Load model & run robotic arm visualization")
-        print("2. Train new IK model")
+        print("2. Train new robot arm model")
         print("3. Back to main menu")
         choice = _input_choice("Select option (1-3): ", {"1", "2", "3"})
         if choice == "3":
@@ -64,9 +66,9 @@ def ik_menu(network_manager: NetworkManager):
             network_manager.save_network(model, training_history)
             networks = {"3d": model}
         else:
-            selected_version = network_manager.select_and_load_model("Select IK model to load")
+            selected_version = network_manager.select_and_load_model("Select robot arm model to load")
             if selected_version is None:
-                continue  # User cancelled, stay in menu
+                continue
 
             networks, training_history = network_manager.load_networks(version=selected_version)
             if not networks:
@@ -85,7 +87,7 @@ def ik_menu(network_manager: NetworkManager):
 
 def vision_menu():
     while True:
-        print("\nVision Menu:")
+        print("\nConveyor Models Menu:")
         print("1. Load model & run conveyor demo")
         print("2. Train new conveyor classifier")
         print("3. Back to main menu")
@@ -105,7 +107,7 @@ def vision_menu():
             if model is None:
                 continue  # User cancelled, stay in menu
             print()
-            conveyor_main()
+            conveyor_main(classifier_model=model, classifier_path=filepath)
             return
 
 
@@ -121,8 +123,8 @@ def main():
 
     while True:
         print("\nMain Menu:")
-        print("1. IK Models - Train/test robot arm inverse kinematics")
-        print("2. Vision Models - Train/test conveyor object classification")
+        print("1. Robot Arm Models")
+        print("2. Conveyor Models")
         print("3. Exit")
         choice = _input_choice("Select option (1-3): ", {"1", "2", "3"})
         if choice == "1":
@@ -138,7 +140,7 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\nProgram interrupted. Goodbye!")
+        print("\n\nProgram interrupted.")
     except Exception as e:
         print(f"\nAn error occurred: {e}")
         print("Please check your Python environment and try again.")
