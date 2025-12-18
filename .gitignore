@@ -34,3 +34,9 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local datasets / downloads
+data/
+
+# Real image datasets stored inside the vision package
+src/models/vision/dataset/
