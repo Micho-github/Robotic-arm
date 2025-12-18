@@ -1,7 +1,0 @@
-"""Vision models (CNNs)."""
-
-
-
-
-
-

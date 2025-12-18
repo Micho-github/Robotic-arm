@@ -3,7 +3,7 @@ Conveyor Belt Sorting Visualizer - Final UI Fix
 
 A separate visualization showing:
 - Conveyor belt with objects moving along it
-- CNN classifying each object (e.g. apple/banana/orange/rock)
+- CNN classifying each object (8 classes: apple, banana, blackberrie, cucumber, onion, potato, tomato, trash)
 - Robot arm picking objects and placing them in correct bins
 - Statistics panel showing sorting accuracy
 - Top-down 2D view (toggleable) for spatial clarity
@@ -24,11 +24,14 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from models.vision.cnn_conveyor import (
-    get_trained_conveyor_classifier, sample_conveyor_object_image,
-    CLASSES, CLASS_COLORS, BIN_POSITIONS
+    get_trained_conveyor_classifier,
+    CLASSES, CLASS_COLORS, BOX_POSITIONS, DATASET_PATH
 )
+from models.vision.utils.helpers import check_dataset
 from utils.network_manager import NetworkManager
 from utils.kinematics import forward_kinematics_3d, normalize_position, denormalize_angles
+from PIL import Image
+import torch
 
 # Parameters
 a1 = 3.0
@@ -41,6 +44,80 @@ ROBOT_BASE_X = 0.0
 ROBOT_BASE_Y = -2.0
 ROBOT_BASE_Z = -0.6
 
+
+# ============================================================================
+# Visual/Display Functions (moved from models/vision/cnn_conveyor.py)
+# ============================================================================
+
+def _list_image_files(folder):
+    """List all image files in a folder recursively."""
+    exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    out = []
+    for root, _, files in os.walk(folder):
+        for f in files:
+            if os.path.splitext(f)[1].lower() in exts:
+                out.append(os.path.join(root, f))
+    return out
+
+
+def load_image_as_chw_float(image_path, image_size=224):
+    """Load an image path to CHW float32 in [0, 1]."""
+    img = Image.open(image_path).convert("RGB")
+    if image_size is not None:
+        img = img.resize((image_size, image_size), resample=Image.BILINEAR)
+    arr = np.asarray(img, dtype=np.float32) / 255.0  # HWC
+    return np.transpose(arr, (2, 0, 1))  # CHW
+
+
+def sample_real_object_image(class_name, data_dir=DATASET_PATH, image_size=224):
+    """
+    Sample a random real image from an ImageFolder-style dataset.
+    Looks in <data_dir>/train/<class_name> first (if present), else <data_dir>/<class_name>.
+    Returns CHW float32 in [0, 1].
+    """
+    if class_name not in CLASSES:
+        raise ValueError(f"Unknown class '{class_name}'. Expected one of: {CLASSES}")
+
+    candidates = []
+    train_dir = os.path.join(data_dir, "train", class_name)
+    flat_dir = os.path.join(data_dir, class_name)
+    if os.path.isdir(train_dir):
+        candidates = _list_image_files(train_dir)
+    elif os.path.isdir(flat_dir):
+        candidates = _list_image_files(flat_dir)
+
+    if not candidates:
+        raise FileNotFoundError(
+            f"No images found for class '{class_name}'. Expected in '{train_dir}' or '{flat_dir}'."
+        )
+
+    return load_image_as_chw_float(random.choice(candidates), image_size=image_size)
+
+
+def sample_conveyor_object_image(class_name, data_dir=DATASET_PATH, image_size=224, source="auto"):
+    """
+    Unified sampler used by the simulation:
+    - source='auto': use real dataset if available else synthetic
+    - source='real': always real (raises if not available)
+    - source='synthetic': always synthetic
+    Returns CHW float32 in [0, 1].
+    """
+    source = (source or "auto").lower()
+    if source not in {"auto", "real", "synthetic"}:
+        raise ValueError("source must be one of: auto, real, synthetic")
+
+    if source in {"auto", "real"} and check_dataset(classes=CLASSES, data_dir=data_dir):
+        return sample_real_object_image(class_name, data_dir=data_dir, image_size=image_size)
+
+    raise FileNotFoundError(
+        f"Real dataset not found/invalid at '{data_dir}'. "
+        f"Expected train/ and val/ splits with class folders: {CLASSES}"
+    )
+
+
+# ============================================================================
+# Image Processing Helpers for Visualization
+# ============================================================================
 
 def _chw_to_hwc(image_chw):
     if isinstance(image_chw, np.ndarray) and image_chw.ndim == 3 and image_chw.shape[0] == 3:
@@ -217,7 +294,7 @@ class ConveyorSorterVisualizer:
                 ax_b.imshow(img, aspect='auto')
                 ax_b.set_xlim(-pad, W+pad)
                 ax_b.set_ylim(H+pad, -pad)
-            
+
             self.class_btns[cls] = ax_b
         
         # Connect event handler for button clicks
@@ -313,7 +390,7 @@ class ConveyorSorterVisualizer:
         self.ax_top.set_aspect('equal')
         self.ax_top.grid(True, linestyle=':', alpha=0.5)
         self.ax_top.set_facecolor('#ffffff')
-
+        
         # Static Elements (Bins, Belt, Base)
         # Conveyor
         belt_x = np.linspace(-6, 6, 2)
@@ -324,7 +401,7 @@ class ConveyorSorterVisualizer:
         self.ax_top.add_patch(Rectangle((-6, -0.5), 12, 1, facecolor='#333333', alpha=0.3))  # 2D
 
         # Bins
-        for cls, pos in BIN_POSITIONS.items():
+        for cls, pos in BOX_POSITIONS.items():
             color = CLASS_COLORS.get(cls, 'gray')
             # 3D
             self.ax_arm.scatter([pos[0]], [pos[1]], [0], c=[color], s=150, marker='s', alpha=0.6)
@@ -404,7 +481,7 @@ class ConveyorSorterVisualizer:
 
         for obj in self.objects:
             if obj.sorted: continue
-            
+
             # Determine Position
             if getattr(obj, "picked", False):
                 x, y, z = xe, ye, ze
@@ -448,7 +525,7 @@ class ConveyorSorterVisualizer:
         for cls in CLASSES:
             stats_str += f"\n {cls.title().ljust(8)}: {self.sorted_counts[cls]}"
         self.txt_stats.set_text(stats_str)
-
+    
     def move_arm_to(self, tx, ty, tz):
         # IK Wrapper
         if not self.ik_network:
@@ -487,7 +564,7 @@ class ConveyorSorterVisualizer:
         self.btn_start.label.set_text('STOP' if self.is_running else 'START')
         if self.is_running:
             self.run_step()
-
+    
     def reset_sim(self, event):
         self.is_running = False
         self.btn_start.label.set_text('START')
@@ -552,7 +629,7 @@ class ConveyorSorterVisualizer:
         elif self.arm_state == 'picking':
             self.arm_state = 'moving_to_bin'
             t_cls = self.current_target.predicted_class
-            bx, by, bz = BIN_POSITIONS.get(t_cls, [2, 2, 0])
+            bx, by, bz = BOX_POSITIONS.get(t_cls, [2, 2, 0])
             self.move_arm_to(bx, by, bz + 1.5)
         
         elif self.arm_state == 'moving_to_bin':

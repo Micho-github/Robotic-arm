@@ -8,14 +8,13 @@ from models.ik.neural_network import train_ik_network
 from models.vision.cnn_conveyor import (
     get_trained_conveyor_classifier,
     evaluate_conveyor_classifier,
-    evaluate_conveyor_classifier_robust,
-    DEFAULT_REAL_DATA_DIR,
-    is_real_dataset_available,
+    DATASET_PATH,
     CLASSES as CONVEYOR_CLASSES,
     load_existing_conveyor_classifier,
     get_conveyor_model_path,
     select_and_load_vision_model,
 )
+from models.vision.utils.helpers import check_dataset
 
 
 # Global training configuration for IK network (used everywhere)
