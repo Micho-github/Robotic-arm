@@ -2,105 +2,74 @@ import math
 import random
 import numpy as np
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (needed for 3D projection)
-from utils.kinematics import (
-    forward_kinematics_3d,
-    generate_3d_workspace_data,
-    normalize_position,
+from mpl_toolkits.mplot3d import Axes3D
+from models.robotic_arm.arm_model import generate_ik_data
+from models.robotic_arm.utils.helpers import (
     denormalize_angles,
-    MAX_REACH_3D,
+    forward_kinematics_3d,
+    get_max_reach_3d,
+    normalize_position,
 )
-from visualization.components.targets import (
+from visualization.utils import arm_helpers
+from visualization.utils.arm_helpers import (
+    apply_layout,
+    build_controls,
     update_target_value,
     submit_target_value,
-    parse_and_clamp,
 )
-from visualization.components.analytics import (
-    show_loss_plots as comp_show_loss_plots,
-    show_error_comparison as comp_show_error_comparison,
-    show_training_data as comp_show_training_data,
-)
-
-# Link lengths (as specified in the project)
-a1 = 3.0  # 3 cm
-a2 = 2.0  # 2 cm
 
 class RobotArmVisualizer:
-    def __init__(self, networks=None, training_history=None, network_manager=None):
+    def __init__(self, networks=None, training_history=None, network_manager=None, a1=3.0, a2=2.0):
         self.networks = networks or {}
-        # Training history is expected to be a dict like:
-        # {'3d': {'train_loss': [...], 'val_loss': [...], 'val_acc': [...]}}
         self.training_history = training_history or {
             '3d': {"train_loss": [], "val_loss": [], "val_acc": []}
         }
-        self.network_manager = network_manager
+        self.a1 = a1
+        self.a2 = a2
         self.current_nn = None
         self.target_x = 3.0
         self.target_y = 2.0
         self.target_z = 0.0
         self.is_dragging = False
-        self._syncing_input = False  # prevent recursive slider/text updates
+        self._syncing_input = False
 
-        # Create main figure with clearer left/right consoles and centered plot
         self.fig = plt.figure(figsize=(16, 10))
-        # Move main title into the left console area
         self.fig.text(
             0.012, 0.97,
             'Robot Arm Inverse Kinematics\nNeural Network (3D View)',
             fontsize=13, fontweight='bold', ha='left', va='top'
         )
 
-        # Apply shared layout (panels, borders, headers)
-        from visualization.components.layout import apply_layout
         apply_layout(self.fig)
 
-        # Create main robot arm plot as a 3D axis (arm still lies in z = 0 plane)
         self.ax = self.fig.add_subplot(111, projection='3d')
 
-        # Adjust layout: left console, central plot, right console
         self.fig.subplots_adjust(left=0.32, bottom=0.18, right=0.75, top=0.93)
 
         self.setup_arm_plot()
         self.setup_controls()
-        # NOTE: Mouse-based target picking on a 3D axis is tricky to get
-        # fully correct (it requires ray casting from the camera into 3D).
-        # Our previous approach treated the 2D mouse coordinates as (x, y)
-        # directly, which works only from a fixed top-down view and becomes
-        # confusing once the user rotates the 3D camera.
-        #
-        # To keep the interaction predictable, we now rely on the X/Y/Z
-        # sliders and the "Random Target" button instead of mouse clicks.
-        # If we ever add true 3D picking, this is where we'd re-enable it.
-        # Optional: enable mouse target picking
-        # from visualization.components.interactions import connect_mouse_events
-        # connect_mouse_events(self)
 
-        # If networks were provided (recommended), select the 3D network
         if self.networks:
             if '3d' in self.networks:
                 self.current_nn = self.networks['3d']
             else:
-                # Fallback: pick the first available network
                 self.current_nn = list(self.networks.values())[0]
         else:
-            # No networks passed in – try to load via NetworkManager if available
-            if self.network_manager is not None:
-                print("No networks provided to visualizer. Attempting to load from saved models...")
-                networks, history = self.network_manager.load_networks()
-                self.networks = networks
-                self.training_history = history or {'3d': []}
-                if '3d' in self.networks:
-                    self.current_nn = self.networks['3d']
-                elif self.networks:
+            from models.robotic_arm.utils.helpers import load_robotic_arm_networks
+            print("No networks provided to visualizer. Attempting to load from saved models...")
+            networks, history = load_robotic_arm_networks()
+            self.networks = networks
+            self.training_history = history or {'3d': []}
+            if '3d' in self.networks:
+                self.current_nn = self.networks['3d']
+            elif self.networks:
                     self.current_nn = list(self.networks.values())[0]
 
-        # If we have a network, update the plot; otherwise just show the empty arm
         if self.current_nn is not None:
             self.update_visualization()
 
     def setup_arm_plot(self):
-        # Set 3D axes limits (arm still lies in z = 0 plane)
-        lim = float(MAX_REACH_3D) + 1.0
+        lim = float(get_max_reach_3d()) + 1.0
         self.ax.set_xlim(-lim, lim)
         self.ax.set_ylim(-lim, lim)
         self.ax.set_zlim(-lim, lim)
@@ -109,15 +78,11 @@ class RobotArmVisualizer:
         self.ax.set_ylabel('Y Position (cm)')
         self.ax.set_zlabel('Z Position (cm)')
 
-        # Make the box roughly cubic so rotations look nicer
         try:
             self.ax.set_box_aspect((1, 1, 1))
         except Exception:
-            # Older matplotlib versions may not support set_box_aspect
             pass
 
-        # Capture the default 3D camera view so the "Reset View" button works reliably.
-        # (If these aren't set, reset_view() will fail silently and appear broken.)
         try:
             self.default_elev = float(getattr(self.ax, "elev", 30.0))
             self.default_azim = float(getattr(self.ax, "azim", -60.0))
@@ -125,18 +90,11 @@ class RobotArmVisualizer:
             self.default_elev = 30.0
             self.default_azim = -60.0
 
-        # Reconfigure default 3D mouse controls so LEFT button is free for our own handler.
-        # - Right drag: rotate 3D view
-        # - Middle drag: pan
-        # - Scroll wheel: still zooms normally
         try:
             self.ax.mouse_init(rotate_btn=3, pan_btn=2, zoom_btn=3)
         except Exception:
-            # If this fails on very old matplotlib, the plot will still work;
-            # it just means left-drag may continue to rotate the view.
             pass
 
-        # Draw ground plane for visual reference
         plane_extent = np.linspace(-6, 6, 10)
         Xp, Yp = np.meshgrid(plane_extent, plane_extent)
         Zp = np.zeros_like(Xp)
@@ -151,8 +109,8 @@ class RobotArmVisualizer:
 
         # Draw workspace boundaries as circles in the XY plane (z = 0)
         theta = np.linspace(0, 2 * math.pi, 200)
-        outer_r = float(MAX_REACH_3D)
-        inner_r = abs(a1 - a2)
+        outer_r = float(get_max_reach_3d())
+        inner_r = abs(self.a1 - self.a2)
 
         outer_x = outer_r * np.cos(theta)
         outer_y = outer_r * np.sin(theta)
@@ -207,10 +165,10 @@ class RobotArmVisualizer:
         self.legend = self.fig.legend(
             [self.link1_line, self.link2_line, self.joint1_point, self.joint2_point,
              self.end_effector_nn, self.end_effector_analytical, self.target_point,
-             self.workspace_outer_line, self.reach_ring_xz, self.reach_ring_yz],
+             self.workspace_outer_line],
             ['Link 1 (3cm)', 'Link 2 (2cm)', 'Base Joint', 'Elbow Joint',
              'NN End Effector', 'Analytical Solution', 'Target Position',
-             'Max Reach (XY)', 'Max Reach (XZ)', 'Max Reach (YZ)'],
+             'Max Reach'],
             loc='upper left',
             bbox_to_anchor=(0.012, 0.30, 0.216, 0.0),
             bbox_transform=self.fig.transFigure,
@@ -256,22 +214,22 @@ class RobotArmVisualizer:
 
             # Constrain to workspace (with small margin)
             distance = math.sqrt(mouse_x**2 + mouse_y**2)
-            max_reach = a1 + a2 - 0.1
+            max_reach = self.a1 + self.a2 - 0.1
 
             if distance > max_reach:
                 # Scale to maximum reachable distance
                 scale = max_reach / distance
                 mouse_x *= scale
                 mouse_y *= scale
-            elif distance < abs(a1 - a2) + 0.1:
+            elif distance < abs(self.a1 - self.a2) + 0.1:
                 # Scale to minimum reachable distance
                 if distance > 0:
-                    scale = (abs(a1 - a2) + 0.1) / distance
+                    scale = (abs(self.a1 - self.a2) + 0.1) / distance
                     mouse_x *= scale
                     mouse_y *= scale
                 else:
                     # If at origin, set to minimum reachable point
-                    mouse_x = abs(a1 - a2) + 0.1
+                    mouse_x = abs(self.a1 - self.a2) + 0.1
                     mouse_y = 0
 
             # Update target position
@@ -288,8 +246,6 @@ class RobotArmVisualizer:
     def setup_controls(self):
         """Setup interactive controls"""
         # Build controls via helper to keep this method small
-        from visualization.components.ui_controls import build_controls
-
         ctrl = build_controls(
             self.fig,
             callbacks={
@@ -385,7 +341,7 @@ class RobotArmVisualizer:
 
         # Constrain target to reachable 3D sphere; if out of range, project to the
         # nearest point in the same direction so the arm “reaches as far as it can”.
-        max_reach = MAX_REACH_3D - 0.1  # slight margin
+        max_reach = get_max_reach_3d() - 0.1  # slight margin
         dist_3d = math.sqrt(self.target_x**2 + self.target_y**2 + self.target_z**2)
         if dist_3d > max_reach and dist_3d > 1e-6:
             scale = max_reach / dist_3d
@@ -411,8 +367,8 @@ class RobotArmVisualizer:
         x_nn, y_nn, z_nn = forward_kinematics_3d(theta1_nn, theta2_nn, theta3_nn)
 
         # Joint position between links (shoulder to elbow)
-        r1 = a1 * math.cos(theta2_nn)
-        z1 = a1 * math.sin(theta2_nn)
+        r1 = self.a1 * math.cos(theta2_nn)
+        z1 = self.a1 * math.sin(theta2_nn)
         x1_nn = r1 * math.cos(theta1_nn)
         y1_nn = r1 * math.sin(theta1_nn)
 
@@ -453,7 +409,6 @@ class RobotArmVisualizer:
         self.fig.canvas.draw()
 
     def sync_inputs_to_targets(self):
-        """Update sliders and text boxes to reflect current target values without recursion."""
         self._syncing_input = True
         try:
             try:
@@ -472,18 +427,14 @@ class RobotArmVisualizer:
             self._syncing_input = False
 
     def show_loss_plots(self, event):
-        """Show training loss and accuracy in a new window."""
-        comp_show_loss_plots(self, event)
+        arm_helpers.show_loss_plots(self, event)
 
     def show_error_comparison(self, event):
-        """Show a simple 3D error comparison for the current network"""
-        comp_show_error_comparison(self, event)
+        arm_helpers.show_error_comparison(self, event)
 
     def show_training_data(self, event):
-        """Show 3D training data visualization in a new window"""
-        comp_show_training_data(event)
+        arm_helpers.show_training_data(event)
 
     def show(self):
-        """Display the main robot arm visualization"""
         plt.tight_layout()
         plt.show()
